@@ -1,0 +1,35 @@
+{
+  "name": "@brianmmorton/crew",
+  "version": "0.1.0",
+  "description": "Autonomous agent team: role-specialized coding agents that propose typed work into Linear, gate material changes behind human-approved PRDs, and drain approved work into PRs — running on your machine against your Claude subscription.",
+  "type": "module",
+  "bin": {
+    "crew": "./dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "templates"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -w -p tsconfig.json",
+    "test": "node --test --import tsx ./src/**/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "crew": "tsx src/cli/index.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@linear/sdk": "^37.0.0",
+    "commander": "^12.1.0",
+    "croner": "^10.0.1",
+    "yaml": "^2.5.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

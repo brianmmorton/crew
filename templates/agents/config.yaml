@@ -1,0 +1,49 @@
+# crew — per-project config (<repo>/.crew/config.yaml). Versioned; edit per project.
+# Tip: run `crew setup` to have an agent analyze your repo and fill most of this in.
+
+project: ""                    # your project name
+
+repo:
+  path: "."                    # repo root, relative to this .crew/ parent
+  baseBranch: main
+
+linear:
+  team: "YOUR LINEAR TEAM"     # exact team name as it appears in Linear
+  labels:
+    prd: "type:prd"
+    bug: "type:bug"
+    task: "type:task"
+    chore: "type:chore-dx"
+  statuses:
+    backlog: "Backlog"
+    ready: "Todo"
+    inProgress: "In Progress"
+    review: "In Review"
+    needsApproval: "Needs Approval"   # add this status in Linear (unstarted type)
+    done: "Done"
+  approvedStates: ["Todo", "In Progress", "In Review", "Done"]
+
+budget:
+  target: max-monthly
+  implementerWorkers: 1
+  backoffMinutes: 30
+  pollSeconds: 60
+
+gates:
+  wipCap: 3
+  verify: {}                   # app -> command, e.g. { web: "npm test" }. `crew setup` fills this in.
+  noTouch:                     # globs the Implementer must never modify
+    - ".env*"
+    - "**/migrations/**"
+    - ".github/**"
+
+personas:
+  implementer: { cadence: "continuous" }
+  qa:          { cadence: "0 */6 * * *" }
+  # design:    { cadence: "0 9 * * 1,4" }   # enable if the project has a UI
+  # architect: { cadence: "0 9 * * 2,5" }
+
+triager:
+  cadence: "0 * * * *"
+  dedupThreshold: 0.85
+  backlogCap: 30
