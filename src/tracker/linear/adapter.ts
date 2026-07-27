@@ -2,6 +2,7 @@ import { LinearClient } from "@linear/sdk";
 import type { Issue, Team } from "@linear/sdk";
 import type {
   CrewConfig,
+  EmptySelectionReason,
   PersonaName,
   Proposal,
   TrackerMeta,
@@ -18,7 +19,7 @@ import {
   severityToPriority,
   typeToLabelName,
 } from "../shared.js";
-import { isExecutable, rankCandidates } from "../selection.js";
+import { explainEmpty, isExecutable, labelGateActive, rankCandidates } from "../selection.js";
 
 /** Modest page size for the queries we run. */
 const PAGE = 250;
@@ -224,6 +225,28 @@ export class LinearAdapter implements TrackerPort {
     const executable = items.filter((i) => isExecutable(i, this.cfg));
     const ranked = rankCandidates(executable);
     return ranked[0] ?? null;
+  }
+
+  /**
+   * Re-run the ready-state query *without* the label clause, so the caller can
+   * tell an empty queue from one the gate emptied. Skipped entirely when no
+   * gate is configured — there'd be nothing to attribute, and this costs a
+   * second query.
+   */
+  async explainEmptySelection(): Promise<EmptySelectionReason | null> {
+    if (!labelGateActive(this.cfg)) return null;
+    this.ensureMeta();
+    const team = this.ensureTeam();
+
+    const conn = await team.issues({
+      filter: {
+        state: { name: { eq: this.cfg.tracker.statuses.ready } },
+        ...this.projectFilter(),
+      },
+      first: PAGE,
+    });
+    const items = await Promise.all(conn.nodes.map((i) => this.toWorkItem(i)));
+    return explainEmpty(items, this.cfg);
   }
 
   private async countInState(stateName: string): Promise<number> {

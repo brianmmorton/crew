@@ -337,6 +337,19 @@ export interface TrackerMeta {
   projectId?: string;
 }
 
+/**
+ * Why `selectNextExecutable()` returned nothing. `ready` counts items sitting
+ * in the ready state before the label gate; `passedGate` counts those that
+ * survived it. `ready > 0 && passedGate === 0` is the misconfiguration worth
+ * shouting about — work is waiting and the gate is eating all of it.
+ */
+export interface EmptySelectionReason {
+  ready: number;
+  passedGate: number;
+  requireLabels: string[];
+  excludeLabels: string[];
+}
+
 export interface TrackerPort {
   resolveMeta(): Promise<TrackerMeta>;
 
@@ -347,6 +360,17 @@ export interface TrackerPort {
    * and anything already in progress.
    */
   selectNextExecutable(): Promise<WorkItem | null>;
+
+  /**
+   * Why the last selection came back empty. Called only when
+   * `selectNextExecutable()` returned null, to tell "nothing is ready" apart
+   * from "the label gate rejected everything" — a misconfigured
+   * `executable.requireLabels` otherwise looks exactly like an empty queue.
+   *
+   * Diagnostic only: never gates behaviour, and implementations may return
+   * null when they can't cheaply tell.
+   */
+  explainEmptySelection?(): Promise<EmptySelectionReason | null>;
 
   /** How many items are currently in the inProgress state (for the WIP cap). */
   countInProgress(): Promise<number>;

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { CrewConfig, ItemType, WorkItem } from "../types.js";
-import { isExecutable, rankCandidates } from "./selection.js";
+import { explainEmpty, isExecutable, labelGateActive, rankCandidates } from "./selection.js";
 
 const cfg = {
   tracker: {
@@ -149,3 +149,33 @@ test("rankCandidates does not mutate its input", () => {
 // Reference the ItemType import so it is not flagged as unused under strict TS.
 const _executableTypes: ItemType[] = ["bug", "task", "chore-dx"];
 void _executableTypes;
+
+// ------------------------- empty-selection diagnostics ---------------------
+
+test("labelGateActive is false only when both lists are empty", () => {
+  assert.equal(labelGateActive(cfg), false); // no executable block at all
+  assert.equal(labelGateActive(gated({})), false);
+  assert.equal(labelGateActive(gated({ requireLabels: ["crew"] })), true);
+  assert.equal(labelGateActive(gated({ excludeLabels: ["blocked"] })), true);
+});
+
+test("explainEmpty attributes a gate-emptied queue", () => {
+  const g = gated({ requireLabels: ["crew"] });
+  const r = explainEmpty([item({ labels: ["other"] }), item({ labels: [] })], g);
+  assert.equal(r.ready, 2);
+  assert.equal(r.passedGate, 0); // the signal the loop warns on
+  assert.deepEqual(r.requireLabels, ["crew"]);
+});
+
+test("explainEmpty distinguishes a genuinely empty queue", () => {
+  const r = explainEmpty([], gated({ requireLabels: ["crew"] }));
+  assert.equal(r.ready, 0);
+  assert.equal(r.passedGate, 0);
+});
+
+test("explainEmpty reports partial coverage when some items pass", () => {
+  const g = gated({ requireLabels: ["crew"] });
+  const r = explainEmpty([item({ labels: ["crew"] }), item({ labels: ["other"] })], g);
+  assert.equal(r.ready, 2);
+  assert.equal(r.passedGate, 1);
+});

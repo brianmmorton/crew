@@ -1,5 +1,6 @@
 import type {
   CrewConfig,
+  EmptySelectionReason,
   ItemType,
   PersonaName,
   Proposal,
@@ -17,7 +18,7 @@ import {
   severityToPriority,
   typeToLabelName,
 } from "../shared.js";
-import { isExecutable, rankCandidates } from "../selection.js";
+import { explainEmpty, isExecutable, labelGateActive, rankCandidates } from "../selection.js";
 import {
   JiraClient,
   adfToText,
@@ -309,6 +310,28 @@ export class JiraAdapter implements TrackerPort {
     const items = await this.withParentStatuses(issues);
     const executable = items.filter((i) => isExecutable(i, this.cfg));
     return rankCandidates(executable)[0] ?? null;
+  }
+
+  /**
+   * Re-run the ready-state search *without* the label clause, so the caller can
+   * tell an empty queue from one the gate emptied. Skipped entirely when no
+   * gate is configured — there'd be nothing to attribute, and this costs a
+   * second search.
+   */
+  async explainEmptySelection(): Promise<EmptySelectionReason | null> {
+    if (!labelGateActive(this.cfg)) return null;
+    this.ensureMeta();
+
+    const issues = await this.client.search(
+      `${this.scope()} AND status = ${jql(this.cfg.tracker.statuses.ready)}`,
+      { maxResults: PAGE },
+    );
+    // Parent statuses don't matter here: the question is only how many ready
+    // items the label gate removed, and the gate never reads the parent.
+    return explainEmpty(
+      issues.map((i) => this.toWorkItem(i)),
+      this.cfg,
+    );
   }
 
   /**

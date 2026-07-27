@@ -1,4 +1,4 @@
-import type { CrewConfig, ItemType, WorkItem } from "../types.js";
+import type { CrewConfig, EmptySelectionReason, ItemType, WorkItem } from "../types.js";
 
 /** Item types the Implementer is allowed to execute directly. */
 const EXECUTABLE_TYPES: ReadonlySet<ItemType> = new Set<ItemType>([
@@ -35,6 +35,27 @@ export function isExecutable(item: WorkItem, cfg: CrewConfig): boolean {
   if (item.parentApproved === false) return false;
   if (!passesLabelFilter(item, cfg)) return false;
   return true;
+}
+
+/** True when either label list is non-empty — i.e. the gate can reject anything. */
+export function labelGateActive(cfg: CrewConfig): boolean {
+  const gate = cfg.tracker.executable;
+  return !!(gate?.requireLabels?.length || gate?.excludeLabels?.length);
+}
+
+/**
+ * Summarize an empty selection: how many items were sitting in the ready state
+ * (before the label gate) versus how many survived it. Adapters pass the
+ * *unfiltered* ready page so the difference is attributable to the gate.
+ */
+export function explainEmpty(items: WorkItem[], cfg: CrewConfig): EmptySelectionReason {
+  const gate = cfg.tracker.executable;
+  return {
+    ready: items.length,
+    passedGate: items.filter((i) => passesLabelFilter(i, cfg)).length,
+    requireLabels: gate?.requireLabels ?? [],
+    excludeLabels: gate?.excludeLabels ?? [],
+  };
 }
 
 /**

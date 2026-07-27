@@ -245,3 +245,23 @@ test("both lists produce both clauses, alongside the state filter", async () => 
   assert.equal((filters[0].and as unknown[]).length, 2);
   assert.deepEqual(filters[0].state, { name: { eq: "Todo" } });
 });
+
+test("explainEmptySelection makes no query when no gate is configured", async () => {
+  const { adapter, filters } = fakeSelectAdapter();
+  assert.equal(await (adapter as unknown as {
+    explainEmptySelection: () => Promise<unknown>;
+  }).explainEmptySelection(), null);
+  assert.equal(filters.length, 0, "must not cost a query when there is nothing to attribute");
+});
+
+test("explainEmptySelection queries ready items without the label filter", async () => {
+  const { adapter, filters } = fakeSelectAdapter({ requireLabels: ["crew"] });
+  await (adapter as unknown as {
+    explainEmptySelection: () => Promise<unknown>;
+  }).explainEmptySelection();
+  // Carrying the gate here would make passedGate === ready by construction, so
+  // the diagnostic could never detect a gate that filters everything out.
+  assert.equal(filters.length, 1);
+  assert.ok(!("and" in filters[0]), "diagnostic query must not carry the gate");
+  assert.deepEqual(filters[0].state, { name: { eq: "Todo" } });
+});

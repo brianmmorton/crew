@@ -9,7 +9,7 @@ import { implementerCycle, proposerCycle } from "../engine/cycles.js";
 import { runSupervised } from "../engine/supervisor.js";
 import { runSetup } from "../setup/onboard.js";
 import { ensureGitignored } from "../util/gitignore.js";
-import { runDoctor } from "../util/doctor.js";
+import { checkLabelGate, runDoctor } from "../util/doctor.js";
 import { logger, logToFile, logFilePath } from "../util/logger.js";
 import { Cron } from "croner";
 import { writeFileSync } from "node:fs";
@@ -158,6 +158,16 @@ program
     const cfg = loadConfig();
     console.log("Prerequisites:");
     const ok = await runDoctor(cfg, logger);
+    // Advisory, and only worth attempting once the credentials above passed —
+    // it needs a live tracker. A failure here never changes the exit code.
+    if (ok) {
+      try {
+        const ports = await buildPorts(cfg);
+        await checkLabelGate(cfg, ports.tracker);
+      } catch (e) {
+        logger.warn(`skipped the label-gate check: ${String(e).split("\n")[0]}`);
+      }
+    }
     process.exit(ok ? 0 : 1);
   });
 

@@ -1,4 +1,4 @@
-import type { CrewConfig, Logger } from "../types.js";
+import type { CrewConfig, EmptySelectionReason, Logger } from "../types.js";
 import type { Ports } from "./ports.js";
 import { implementerCycle } from "./cycles.js";
 
@@ -120,11 +120,36 @@ export async function runExecutorLoop(
         // Explain the idle, throttled to ~5 min, so it's never a silent mystery.
         if (now - lastIdleLog > 5 * 60 * 1000) {
           lastIdleLog = now;
-          logger.info(
-            `executor idle: no ready work in "${cfg.tracker.statuses.ready}" ` +
-              `(labeled type:task/bug/chore-dx). ${backlog} in "${cfg.tracker.statuses.backlog}". ` +
-              `Move an item to "${cfg.tracker.statuses.ready}" + add a type label, then press i.`,
-          );
+
+          // A label gate that rejects everything looks identical to an empty
+          // queue from here, so ask the tracker to attribute it before falling
+          // back to the generic message. Diagnostic only — never fatal.
+          let gated: EmptySelectionReason | null = null;
+          try {
+            gated = (await ports.tracker.explainEmptySelection?.()) ?? null;
+          } catch {
+            /* ignore — a failed diagnostic must not disturb the idle path */
+          }
+
+          if (gated && gated.ready > 0 && gated.passedGate === 0) {
+            const clauses = [
+              gated.requireLabels.length ? `requireLabels: ${gated.requireLabels.join(", ")}` : "",
+              gated.excludeLabels.length ? `excludeLabels: ${gated.excludeLabels.join(", ")}` : "",
+            ]
+              .filter(Boolean)
+              .join("; ");
+            logger.warn(
+              `executor idle: ${gated.ready} item(s) in "${cfg.tracker.statuses.ready}" but 0 passed ` +
+                `the label gate (${clauses}). Check tracker.executable in ${cfg.configDir}/config.yaml — ` +
+                `a label that matches nothing on the board stalls the executor.`,
+            );
+          } else {
+            logger.info(
+              `executor idle: no ready work in "${cfg.tracker.statuses.ready}" ` +
+                `(labeled type:task/bug/chore-dx). ${backlog} in "${cfg.tracker.statuses.backlog}". ` +
+                `Move an item to "${cfg.tracker.statuses.ready}" + add a type label, then press i.`,
+            );
+          }
         }
 
         onIdle?.(now - idleSince, backlog);

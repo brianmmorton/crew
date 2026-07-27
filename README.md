@@ -386,6 +386,19 @@ The gate applies to Linear and Jira alike, and is pushed into the tracker query
 so excluded items don't crowd out real work in the page crew fetches. It gates
 selection only — an item already in progress is unaffected by a label change.
 
+You don't need a new label to express "only work crew's own output": every item
+an agent files already carries `agent-authored`, so `requireLabels:
+["agent-authored"]` closes the loop with no extra config. Note that this also
+excludes anything *you* file by hand, since only crew's creates get that label.
+A persona's own `label` works the same way for a narrower slice — set
+`personas.qa.label: "triage:auto"` and gate on `triage:auto` to drain only QA's
+findings.
+
+Since the gate reads labels the tracker owns, a name that matches nothing on the
+board stalls the executor silently. Two things catch that: `crew doctor` reports
+how many ready items pass the gate, and the run log warns (rather than reporting
+a plain idle) whenever items are waiting but none survive the gate.
+
 ### Reviewers
 
 A reviewer runs against the branch right after its PR opens. Like every other

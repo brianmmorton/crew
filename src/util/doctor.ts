@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { CrewConfig, Logger } from "../types.js";
+import type { CrewConfig, Logger, TrackerPort } from "../types.js";
 import { loadEnvFiles } from "./env.js";
 import { REQUIRED_ENV } from "../tracker/factory.js";
 import { FORGE_ENV, forgeCredentialsPresent, forgeEnvHint } from "../git/forge/factory.js";
@@ -129,4 +129,56 @@ export async function runDoctor(
     console.log(allOk ? "\nAll prerequisites satisfied." : "\nMissing prerequisites above — fix the ✗ items.");
   }
   return allOk;
+}
+
+/**
+ * Check the executable label gate against the actual board.
+ *
+ * Kept out of `runDoctor` because it needs a live tracker connection: that runs
+ * at startup in quiet mode, where an extra network round-trip (and a failure
+ * that isn't really a prereq problem) isn't wanted.
+ *
+ * Advisory only — returns nothing and never fails the command. A gate that
+ * matches nothing is a config mistake, not a broken install, and the user may
+ * be mid-way through setting the board up.
+ */
+export async function checkLabelGate(
+  cfg: CrewConfig,
+  tracker: TrackerPort,
+): Promise<void> {
+  const gate = cfg.tracker.executable;
+  if (!gate?.requireLabels?.length && !gate?.excludeLabels?.length) return;
+
+  console.log("\nExecutable label gate:");
+  const req = gate.requireLabels ?? [];
+  const exc = gate.excludeLabels ?? [];
+  if (req.length) console.log(`  requireLabels: ${req.join(", ")}`);
+  if (exc.length) console.log(`  excludeLabels: ${exc.join(", ")}`);
+
+  let reason: Awaited<ReturnType<NonNullable<TrackerPort["explainEmptySelection"]>>> = null;
+  try {
+    reason = (await tracker.explainEmptySelection?.()) ?? null;
+  } catch (e) {
+    console.log(`  ○ could not query the board — ${String(e).split("\n")[0]}`);
+    return;
+  }
+  if (!reason) {
+    console.log("  ○ tracker cannot report gate coverage");
+    return;
+  }
+
+  if (reason.ready === 0) {
+    console.log(
+      `  ○ nothing in "${cfg.tracker.statuses.ready}" to check the gate against ` +
+        `— move an item there and re-run`,
+    );
+  } else if (reason.passedGate === 0) {
+    console.log(
+      `  ✗ ${reason.ready} item(s) in "${cfg.tracker.statuses.ready}", none pass the gate\n` +
+        `      → the executor will sit idle. Check these labels exist on your board ` +
+        `and are spelled exactly as they appear there.`,
+    );
+  } else {
+    console.log(`  ✓ ${reason.passedGate}/${reason.ready} ready item(s) pass the gate`);
+  }
 }

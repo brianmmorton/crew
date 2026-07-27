@@ -502,3 +502,37 @@ test("jiraLabel collapses whitespace so Jira accepts the label", () => {
   assert.equal(jiraLabel("  spaced  out  "), "spaced-out");
   assert.equal(jiraLabel("type:bug"), "type:bug");
 });
+
+test("explainEmptySelection makes no query when no gate is configured", async () => {
+  const { adapter } = primed({}, cfg);
+  let searches = 0;
+  (adapter as unknown as { client: { search: unknown } }).client = {
+    search: async () => {
+      searches++;
+      return [];
+    },
+  };
+  assert.equal(await adapter.explainEmptySelection(), null);
+  assert.equal(searches, 0, "must not cost a query when there is nothing to attribute");
+});
+
+test("explainEmptySelection counts ready items without the label clause", async () => {
+  const { adapter } = primed({}, gatedCfg({ requireLabels: ["crew"] }));
+  const jqls: string[] = [];
+  (adapter as unknown as { client: { search: unknown } }).client = {
+    search: async (q: string) => {
+      jqls.push(q);
+      return [
+        { id: "1", key: "BRI-1", fields: { summary: "a", status: { name: "Todo" }, labels: ["type:task"] } },
+        { id: "2", key: "BRI-2", fields: { summary: "b", status: { name: "Todo" }, labels: ["type:task", "crew"] } },
+      ];
+    },
+  };
+
+  const r = await adapter.explainEmptySelection();
+  // The diagnostic query must NOT carry the gate, or it could only ever report
+  // passedGate === ready and would never detect a gate that filters everything.
+  assert.ok(!jqls[0].includes("labels in"), jqls[0]);
+  assert.equal(r?.ready, 2);
+  assert.equal(r?.passedGate, 1);
+});
