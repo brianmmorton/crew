@@ -42,7 +42,7 @@ export async function buildPorts(cfg: CrewConfig): Promise<Ports> {
   const linear = new LinearAdapter(apiKey, cfg);
   const meta = await linear.resolveMeta();
   const git = new GitAdapter(cfg.repo.path, cfg.repo.baseBranch);
-  const persona = new PersonaRunner();
+  const persona = new PersonaRunner(cfg);
 
   const prompts: Partial<Record<PersonaName, string>> = {};
   const names: PersonaName[] = ["implementer", "qa", "design", "architect", "triager"];

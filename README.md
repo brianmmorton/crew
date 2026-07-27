@@ -1,145 +1,126 @@
 # crew
 
-An autonomous agent team for a code repo. Role-specialized agents **propose**
-typed work into Linear, anything **material** is gated behind a human-approved
-PRD, and an **executor** drains approved work into pull requests — all running on
-your machine against your Claude subscription, backing off when your usage window
-is spent.
+An autonomous agent team for any code repository. Role-specialized agents propose
+typed work into [Linear](https://linear.app), anything **material** is gated
+behind a human-approved PRD, and an executor drains approved work into pull
+requests — running on your machine against your own coding-agent CLI.
 
-It's project-agnostic: the engine knows nothing about any specific repo. Each
-target repo gets a versioned `.crew/` folder (config + the material-impact
-constitution + persona prompts). Point `crew` at a different repo's `.crew/`
-and it just works.
+crew is project- and provider-agnostic: the engine assumes no language or
+toolchain, and it can drive Claude Code, Codex, Cursor, or any other agent CLI.
+Each repo gets a small versioned `.crew/` folder describing how to run it.
 
-## Design in one breath
+## What it does
 
-- **Agents are stateless workers; the engine owns all state.** Proposer personas
-  (QA, Design, Architect) return structured JSON proposals — they never write to
-  Linear. The Implementer produces a commit — it never touches Linear. The engine
-  performs every Linear transition and all git/PR work deterministically.
-- **Linear is the single source of truth** and your review/approval surface.
-- **Two gates in code, not convention:** the Implementer can't claim a task whose
-  parent PRD isn't approved, and no PR opens until the affected app's verify
-  script passes.
+crew turns a Linear board into a work queue that a small team of agents moves
+through, with you at two control points:
 
-## What's implemented (Phase 1)
+- **Proposers** (QA, Design, Architect) run on a schedule, read the repo
+  read-only, and file typed issues — bugs, tasks, chores, or, for anything that
+  materially affects the product, a **PRD** that waits for your approval.
+- The **Implementer** picks up ready work, implements it in an isolated git
+  worktree, and opens a **pull request** — it never commits to your main branch,
+  and nothing merges without your review.
+- A **self-review** step after each task files developer-experience friction as
+  follow-up chores, and dedup keeps the backlog from ballooning.
 
-- `crew init` — scaffold generic `.crew/` templates into a repo (and gitignore `.crew/.env`).
-- `crew setup` — onboard a repo: an agent analyzes it and tailors the personas,
-  constitution, and config to that project, then sets up `.env` + `.gitignore`.
-- `crew once <persona>` — one cycle of `implementer | qa | design | architect`.
-- `crew run` — run the whole team in one process: the always-on executor loop
-  (WIP-capped, usage-limit back-off) plus the proposers firing on their cadence.
-  On startup it runs any proposer that's due (never run, or a missed tick) so you
-  see activity immediately. In a terminal it accepts single-key controls:
-  `q`/`d`/`a` run QA/Design/Architect now, `i` nudges the executor, `p` pauses/
-  resumes, `s` prints status, `Ctrl-C` quits. `--no-proposers` = executor-only;
-  `--kickoff` = force every proposer to run once at startup.
-- `crew status` — backlog / WIP counts + config summary.
-- Linear client (selection query, state machine, dedup-before-create, label/issue
-  creation), git/worktree/PR plumbing via `gh`, verify + no-touch gates, the
-  headless-Claude persona runner with usage-limit detection, and the self-review
-  loop that files `chore-dx` friction items.
+Linear is the single source of truth; the agents are stateless workers and the
+engine owns every state transition, so the flow is deterministic and auditable.
 
-**Deferred (documented follow-ups):** auto-decomposition of an approved PRD into
-sub-issues, multiple parallel Implementer workers (`implementerWorkers > 1`), and
-a standalone Triager sweep that merges pre-existing duplicates (dedup currently
-happens at create-time, which covers the common case).
+## How it works
 
-## Config directory
+Work items are Linear issues with a **type** (label), a **workflow state**, a
+**priority** (drives pickup order), and a **complexity** (selects which model
+implements it). The executor only works items in your *ready* state that carry a
+task/bug/chore label and aren't blocked by an unapproved PRD. Two gates are
+enforced in code, not convention: the PRD-approval block, and (optionally) a
+project-defined verify command that must pass before a PR is opened.
 
-crew stores its per-project config in **`.crew/`** — deliberately *not* `.agents/`,
-which is claimed by the emerging [.agents Protocol](https://dotagentsprotocol.com/)
-and other tooling. If `.crew` is already taken in a repo, override the name with
-the `CREW_DIR` env var (e.g. `CREW_DIR=.crew-agents crew setup`). `init`/`setup`
-never overwrite existing files, so pointing crew at a directory that already has
-content is safe.
+## Requirements
 
-## Prerequisites
+- **Node.js 20+** (to run crew itself; your project can be any language).
+- **git** and the **GitHub CLI** (`gh`, authenticated) for branch/PR operations.
+- A **coding-agent CLI** — Claude Code (`claude`) by default, or another you
+  configure.
+- A **Linear** account and a personal API key.
 
-- Node 20+.
-- The `claude` CLI, authenticated for headless use: run `claude setup-token` once
-  and export `CLAUDE_CODE_OAUTH_TOKEN` (an interactive login won't work under
-  launchd/cron).
-- `gh` (GitHub CLI), authenticated: `gh auth login`.
-- A Linear personal API key exported as `LINEAR_API_KEY`.
-
-## Linear setup (one time)
-
-1. Add a workflow status named **Needs Approval** (type: unstarted) to your team.
-   The default Backlog / Todo / In Progress / In Review / Done already match.
-2. Type labels (`type:bug`, `type:task`, `type:prd`, `type:chore-dx`) and the
-   `agent-authored` / `agent:*` labels are **created automatically** on first use
-   — you don't need to make them by hand.
+Run `crew doctor` anytime to check these.
 
 ## Install
 
 ```bash
-tar xzf crew-src.tgz && cd crew
+git clone <this-repo> crew && cd crew
 npm install
 npm run build
-npm link          # puts `crew` on your PATH (or: npm i -g .)
+npm link          # puts `crew` on your PATH
 ```
 
-(Or install the prebuilt package tarball directly: `npm i -g ./brianmmorton-crew-0.1.0.tgz`.)
-
-## Use it in a repo
+## Quick start
 
 ```bash
 cd ~/your-project
-crew setup                       # an agent tailors .crew/ to THIS repo, then sets up .env + .gitignore
-git add .crew && git commit -m "chore: add crew agent config"   # (.env stays gitignored)
+crew setup                       # an agent tailors .crew/ to this repo,
+                                 # then sets up .env + .gitignore and checks prereqs
+git add .crew && git commit -m "chore: add crew config"
 
-# Fill in the two secrets in .crew/.env (crew reads it automatically — no shell exports):
-#   LINEAR_API_KEY           — Linear → Settings → Security & access → Personal API keys
-#   CLAUDE_CODE_OAUTH_TOKEN  — run `claude setup-token`
-# For the launchd/cron setup, put the same two lines in ~/.crew/env instead
-# (launchd ignores your shell rc). Precedence: shell env > .crew/.env > ~/.crew/env.
-# Also set the Linear `team` in .crew/config.yaml and add a "Needs Approval" status.
+# Put your secrets in .crew/.env (read automatically — no shell exports):
+#   LINEAR_API_KEY           Linear → Settings → Security & access → API keys
+#   CLAUDE_CODE_OAUTH_TOKEN  for the Claude provider: run `claude setup-token`
 
-crew status                     # sanity check: counts + config
-crew once qa                    # dry-run one proposer; check your Linear Backlog
-# seed a Todo issue in Linear, then:
-crew once implementer           # watch it open a PR
-crew run                        # run the whole team: executor + proposers on cadence
-crew run --kickoff              # ...and fire the proposers once right now, too
+crew status                      # confirm it connects; shows the schedule
+crew run                         # run the whole team (Ctrl-C to stop)
 ```
 
-## Running it unattended
+One-time in Linear: add a workflow status named **Needs Approval** (type
+*unstarted*). Type labels (`type:task`, etc.) are created automatically.
 
-`crew run` already runs the executor *and* the scheduled proposers in one
-process, so a single always-on launchd job is all you need (no separate cron
-entries per persona). Example LaunchAgent
-(`~/Library/LaunchAgents/com.crew.scoutsense.plist`):
+## Commands
 
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>com.crew.scoutsense</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/bin/caffeinate</string><string>-s</string>
-    <string>/opt/homebrew/bin/crew</string><string>run</string>
-  </array>
-  <key>WorkingDirectory</key><string>/Users/macuser/Sites/scoutsense</string>
-  <key>EnvironmentVariables</key><dict>
-    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-    <key>LINEAR_API_KEY</key><string>lin_api_...</string>
-    <key>CLAUDE_CODE_OAUTH_TOKEN</key><string>...</string>
-  </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/Users/macuser/.crew/scoutsense.out.log</string>
-  <key>StandardErrorPath</key><string>/Users/macuser/.crew/scoutsense.err.log</string>
-</dict></plist>
-```
+| Command | What it does |
+|---|---|
+| `crew setup` | Onboard a repo: an agent tailors the config, then sets up `.env`/`.gitignore` |
+| `crew init` | Scaffold generic `.crew/` templates without the agent |
+| `crew doctor` | Check required tools and secrets are present |
+| `crew status` | Backlog / WIP counts, the proposer schedule, and log path |
+| `crew once <persona>` | Run one cycle of `implementer`/`qa`/`design`/`architect` now |
+| `crew run` | Run the whole team in one process (executor loop + scheduled proposers) |
 
-That one job runs the whole team. (You can still run an individual persona
-on demand with `crew once qa` etc.)
+While `crew run` is attached to a terminal it accepts single-key controls:
+`q`/`d`/`a` run QA/Design/Architect now, `i` nudges the executor, `k` kills the
+running agent, `p` pauses/resumes, `s` prints status, `Ctrl-C` quits.
+
+## Configuration
+
+Everything lives in `<repo>/.crew/` (versioned): `config.yaml`, `constitution.md`
+(what counts as "material"), and `personas/*.md` (the agent prompts). Highlights
+of `config.yaml`:
+
+- **agent** — which CLI to drive. `provider: claude` is built-in; for any other
+  CLI set `provider` plus a `command`, `args`, `promptVia`, and optional
+  `modelFlag`.
+- **models** — map work-item complexity (`low`/`medium`/`high`) to a model, so
+  cheap tasks use a cheap model and hard ones your strongest. For Claude, use
+  aliases (`haiku`/`sonnet`/`opus`).
+- **gates** — `verify` (per-app commands; empty = trust the agent + PR review),
+  `setup` (an env-prep command run before verify), `noTouch` (paths agents must
+  never modify), and `wipCap`.
+- **linear** — `team`, an optional `project` to scope this repo, workflow state
+  names, and `autoPromote` (non-material proposals go straight to ready).
+- **personas** — per-persona cron cadences.
+
+The `.crew/` directory name can be overridden with the `CREW_DIR` env var.
+
+## Providers
+
+crew drives Claude Code out of the box with live step-by-step streaming and
+subscription auth. To use a different agent CLI, point the `agent` config at it —
+crew feeds it the prompt, streams its output, and treats the result as the
+agent's work. The agent is responsible for setting up its own toolchain; crew
+never assumes one.
 
 ## Safety
 
-Isolated worktree per task; the executor never works on `main`; the no-touch list
-protects `.env*`, migrations, CI, and infra; two verify gates (the agent's own and
-the engine's) precede any PR; and nothing merges without your review.
+Every task runs in an isolated git worktree on a throwaway branch; the executor
+never touches your main branch. A `noTouch` list protects secrets, migrations,
+CI, and infra. Material changes stop for human approval as a PRD, verification
+gates run before any PR, and nothing merges without your review. Logs stream to
+`.crew/logs/` and each agent run is saved under `.crew/logs/runs/`.

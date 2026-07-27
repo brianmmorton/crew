@@ -7,6 +7,18 @@ repo:
   path: "."                    # repo root, relative to this .crew/ parent
   baseBranch: main
 
+# Which coding-agent CLI crew drives. "claude" is built-in (live streaming +
+# subscription auth). For any other CLI (Codex, Cursor, Grok, a local script),
+# set provider to anything else and configure the command:
+#   agent:
+#     provider: "codex"
+#     command: "codex"            # the CLI binary on your PATH
+#     args: ["exec"]              # base args before the prompt
+#     promptVia: "stdin"          # "stdin" (piped) or "arg" (appended)
+#     modelFlag: "--model"        # how to pass the model (omit if the CLI has none)
+agent:
+  provider: "claude"
+
 linear:
   team: "YOUR LINEAR TEAM"     # exact team name as it appears in Linear
   # project: "My Repo"         # optional: scope this repo to one Linear project

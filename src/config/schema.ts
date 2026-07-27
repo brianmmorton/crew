@@ -60,6 +60,17 @@ export const configSchema = z.object({
   personas: z
     .record(z.object({ cadence: z.string(), model: z.string().optional() }))
     .default({}),
+  agent: z
+    .object({
+      // "claude" = built-in Claude Code adapter (streaming, subscription auth).
+      // Anything else uses the generic command adapter below.
+      provider: z.string().default("claude"),
+      command: z.string().optional(), // CLI binary for non-claude providers
+      args: z.array(z.string()).default([]), // base args before the prompt
+      promptVia: z.enum(["stdin", "arg"]).default("stdin"),
+      modelFlag: z.string().optional(), // how to pass the model, e.g. "--model"
+    })
+    .default({}),
   models: z
     .object({
       default: z.string().optional(),

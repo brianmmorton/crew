@@ -132,6 +132,14 @@ export interface CrewConfig {
     noTouch: string[];
   };
   personas: Partial<Record<PersonaName, { cadence: string; model?: string }>>;
+  /** Which coding-agent CLI to drive. "claude" is built-in; else generic command. */
+  agent: {
+    provider: string;
+    command?: string;
+    args: string[];
+    promptVia: "stdin" | "arg";
+    modelFlag?: string;
+  };
   /** Model selection. byComplexity overrides the default for that complexity. */
   models: {
     default?: string;
