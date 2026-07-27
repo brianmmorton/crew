@@ -194,6 +194,56 @@ rework it — useful, but if the reviewer keeps objecting the pair can loop and
 burn usage. crew logs a loud warning each time this happens; watch for it, or
 give the reviewer a state that parks the work instead (e.g. `Backlog`).
 
+### Idle time
+
+Proposers run on a cron cadence, but the executor drains work continuously — so
+when the queue empties, the team can sit idle until the next tick. Instead of
+waiting, crew pulls a proposer in early:
+
+```yaml
+idle:
+  enabled: true
+  afterMinutes: 10        # how long the queue stays empty before triggering
+  minIntervalMinutes: 30  # floor on how often any one proposer runs
+  maxBacklog: 0           # skip while the backlog is deeper than this
+  maxEmptyRuns: 3         # give up after this many idle runs file nothing
+  agents: []              # which proposers idle may run; empty = all
+```
+
+It runs **one agent at a time**, least-recently-run first — as soon as one files
+something the executor is no longer idle, so firing the whole roster would just
+dump every agent's proposals into an empty backlog at once.
+
+Three things keep this from becoming a loop that burns usage:
+
+- **`minIntervalMinutes` governs cron and idle alike**, so the two paths can't
+  double up on the same agent.
+- **`maxBacklog`** skips the trigger while work is already waiting. A backlog
+  means items need *promoting*, not more proposing.
+- **`maxEmptyRuns`** stops triggering once idle runs stop producing anything. It
+  resumes on its own when the board changes — you file, promote, or close
+  something — rather than needing a restart.
+
+Being idle is a legitimate resting state. If your agents have genuinely run out
+of useful work, the right outcome is a quiet team, not a busy one.
+
+Dedup does the heavy lifting here: an idle proposer runs against an unchanged
+repo, so its most likely output is a re-proposal of something already on the
+board. crew matches new proposals against open work, work completed within
+`triager.dedupLookbackDays` (30 by default), and **canceled work regardless of
+age** — canceling an issue is how you say "don't do this", and that answer
+shouldn't expire on a timer.
+
+One limit worth knowing: dedup compares *titles* (token-set similarity at
+`dedupThreshold`). Two genuinely different phrasings of the same idea — "Add
+retry logic to the Linear adapter" vs. "Retry failed Linear API calls" — won't
+match, and both get filed. Idle runs make near-miss phrasings more likely, since
+it's the same agent looking at the same code. If you see duplicates slipping
+through, lower `dedupThreshold` before reaching for anything else.
+
+Proposers are also skipped while the executor is at `wipCap`, idle or not —
+anything filed then would only queue up behind work that's already waiting.
+
 ## Providers
 
 crew drives Claude Code out of the box with live step-by-step streaming and

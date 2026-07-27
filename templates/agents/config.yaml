@@ -127,3 +127,26 @@ triager:
   cadence: "0 * * * *"
   dedupThreshold: 0.85
   backlogCap: 30
+  # How many days a completed item keeps blocking a near-identical proposal, so
+  # agents don't re-file work that just shipped. Canceled items block forever —
+  # canceling is how you say "don't do this", and that shouldn't expire.
+  dedupLookbackDays: 30
+
+# When the executor runs out of work, pull a proposer in early instead of
+# leaving the team idle until its next cron tick. One agent at a time,
+# least-recently-run first.
+idle:
+  enabled: true
+  # How long the queue must stay empty before triggering.
+  afterMinutes: 10
+  # Floor on how often any one proposer runs — applies to cron runs too, so the
+  # two paths can't double up on each other.
+  minIntervalMinutes: 30
+  # Skip idle triggers while the backlog is deeper than this. A backlog means
+  # work is waiting on you to promote it, not that the team is out of ideas.
+  maxBacklog: 0
+  # Stop triggering after this many idle runs file nothing. Resumes on its own
+  # once the board changes. This is the backstop against a runaway idle loop.
+  maxEmptyRuns: 3
+  # Which proposers idle may run. Empty = all of them.
+  agents: []

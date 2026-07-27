@@ -499,6 +499,17 @@ export async function proposerCycle(
     return { status: "capped" };
   }
 
+  // The executor is saturated, so anything filed now just queues up behind work
+  // that's already waiting. Skip the run rather than burn tokens deepening a
+  // backlog nobody is draining.
+  if ((await ports.linear.countInProgress()) >= cfg.gates.wipCap) {
+    logger.warn(
+      `${name}: executor at WIP cap (${cfg.gates.wipCap} in "${cfg.linear.statuses.inProgress}"); ` +
+        `not filing new items`,
+    );
+    return { status: "capped" };
+  }
+
   const prompt = buildProposerPrompt(cfg, def.prompt, ports.constitution, def);
   logger.info(`${name}: starting run (a headless agent analyzes the repo; this can take a minute)…`);
   const res = await withHeartbeat(logger, name, () =>

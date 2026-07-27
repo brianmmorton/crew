@@ -6,6 +6,7 @@ import {
   keyToAction,
   scheduleInterval,
   dueOnStartup,
+  decideIdleRun,
 } from "./supervisor.js";
 
 test("keyToAction maps the fixed control keys", () => {
@@ -85,4 +86,62 @@ test("dueOnStartup: a full interval ago is due", () => {
   const now = 1_800_000_000_000;
   const old = new Date(now - 7 * 60 * 60 * 1000).toISOString(); // >6h
   assert.equal(dueOnStartup("0 */6 * * *", old, now), true);
+});
+
+// --------------------------- idle triggers ---------------------------------
+
+const IDLE_CFG = { afterMinutes: 10, maxBacklog: 0, maxEmptyRuns: 3 };
+const idleInput = (over: Partial<Parameters<typeof decideIdleRun>[0]> = {}) => ({
+  idleMs: 30 * 60_000,
+  backlog: 0,
+  emptyRuns: 0,
+  gaveUpAtBacklog: null,
+  paused: false,
+  running: false,
+  ...over,
+});
+
+test("decideIdleRun: fires once idle past the threshold with an empty board", () => {
+  assert.deepEqual(decideIdleRun(idleInput(), IDLE_CFG), {
+    run: true,
+    clearedLatch: false,
+  });
+});
+
+test("decideIdleRun: waits out afterMinutes", () => {
+  const d = decideIdleRun(idleInput({ idleMs: 5 * 60_000 }), IDLE_CFG);
+  assert.equal(d.run, false);
+});
+
+test("decideIdleRun: a backlog means promote, not propose", () => {
+  const d = decideIdleRun(idleInput({ backlog: 4 }), IDLE_CFG);
+  assert.equal(d.run, false);
+});
+
+test("decideIdleRun: paused and in-flight runs are never doubled up", () => {
+  assert.equal(decideIdleRun(idleInput({ paused: true }), IDLE_CFG).run, false);
+  assert.equal(decideIdleRun(idleInput({ running: true }), IDLE_CFG).run, false);
+});
+
+test("decideIdleRun: gives up after maxEmptyRuns empty runs", () => {
+  const d = decideIdleRun(
+    idleInput({ emptyRuns: 3, gaveUpAtBacklog: 0 }),
+    IDLE_CFG,
+  );
+  assert.equal(d.run, false);
+});
+
+test("decideIdleRun: a changed backlog clears the give-up latch", () => {
+  // Gave up with an empty backlog; a human has since filed something.
+  const d = decideIdleRun(
+    idleInput({ emptyRuns: 3, gaveUpAtBacklog: 0, backlog: 0 }),
+    { ...IDLE_CFG, maxBacklog: 2 },
+  );
+  assert.deepEqual(d, { run: false, reason: "gave up; board unchanged" });
+
+  const moved = decideIdleRun(
+    idleInput({ emptyRuns: 3, gaveUpAtBacklog: 0, backlog: 1 }),
+    { ...IDLE_CFG, maxBacklog: 2 },
+  );
+  assert.deepEqual(moved, { run: true, clearedLatch: true });
 });

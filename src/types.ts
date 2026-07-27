@@ -242,7 +242,21 @@ export interface CrewConfig {
     default?: string;
     byComplexity: { low?: string; medium?: string; high?: string };
   };
-  triager: { cadence: string; dedupThreshold: number; backlogCap: number };
+  triager: {
+    cadence: string;
+    dedupThreshold: number;
+    backlogCap: number;
+    dedupLookbackDays: number;
+  };
+  /** Idle-triggered proposers: run them early when the executor runs dry. */
+  idle: {
+    enabled: boolean;
+    afterMinutes: number;
+    minIntervalMinutes: number;
+    maxBacklog: number;
+    maxEmptyRuns: number;
+    agents: string[];
+  };
 
   // Resolved at load time (not in the yaml):
   /** Absolute path to the target repo's crew config directory (default .crew/). */
@@ -303,7 +317,11 @@ export interface LinearPort {
   /** Create child sub-issues under an approved PRD (decomposition). */
   createSubIssues(parentId: string, proposals: Proposal[]): Promise<WorkItem[]>;
 
-  /** Open issues whose title is similar (for dedup before create). */
+  /**
+   * Issues whose title is similar (for dedup before create). Covers open work
+   * plus recently completed and canceled work, so an agent can't re-file
+   * something that just shipped or that a human explicitly rejected.
+   */
   findSimilarOpen(title: string): Promise<WorkItem[]>;
 
   addComment(issueId: string, body: string): Promise<void>;

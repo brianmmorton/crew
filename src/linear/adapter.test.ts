@@ -106,3 +106,78 @@ test("a blank agent label is ignored", async () => {
   await adapter.createIssue(proposal, { author: "qa", label: "   " });
   assert.equal((captured.labelIds ?? []).length, 3);
 });
+
+// ----------------------------- dedup scope ---------------------------------
+
+/**
+ * findSimilarOpen has to look past open work. An idle-triggered proposer runs
+ * against an unchanged repo, so its most likely output is a re-proposal of
+ * something already shipped or already rejected — and with autoPromote on, a
+ * re-filed completed item goes straight back to the executor, which drains it,
+ * which triggers idle again.
+ */
+type IssueFilter = {
+  or?: Array<{ state?: { type?: { eq?: string; nin?: string[] } }; completedAt?: unknown }>;
+};
+
+function fakeQueryAdapter(issues: Array<{ title: string }>) {
+  const captured: { filter?: IssueFilter } = {};
+  const dedupCfg = {
+    ...cfg,
+    triager: { dedupThreshold: 0.85, dedupLookbackDays: 30 },
+  } as unknown as CrewConfig;
+
+  const adapter = new LinearAdapter("key", dedupCfg) as unknown as {
+    meta: unknown;
+    team: unknown;
+    ensureMeta: () => unknown;
+    ensureTeam: () => unknown;
+    projectFilter: () => object;
+    toWorkItem: (i: { title: string }) => unknown;
+    findSimilarOpen: LinearAdapter["findSimilarOpen"];
+  };
+
+  adapter.meta = { teamId: "T", myUserId: "U", labelIds: {}, stateIds: {} };
+  adapter.ensureMeta = () => adapter.meta;
+  adapter.projectFilter = () => ({});
+  adapter.toWorkItem = (i) => ({ id: "i1", identifier: "ABC-1", title: i.title, labels: [] });
+  adapter.ensureTeam = () => ({
+    issues: async ({ filter }: { filter: IssueFilter }) => {
+      captured.filter = filter;
+      return { nodes: issues };
+    },
+  });
+  return { adapter, captured };
+}
+
+test("findSimilarOpen queries open, recently-completed, and canceled work", async () => {
+  const { adapter, captured } = fakeQueryAdapter([]);
+  await adapter.findSimilarOpen("anything");
+
+  const branches = captured.filter?.or ?? [];
+  assert.equal(branches.length, 3, "expected open + completed + canceled branches");
+  assert.ok(
+    branches.some((b) => b.state?.type?.nin?.includes("completed")),
+    "still matches open work",
+  );
+  assert.ok(
+    branches.some((b) => b.state?.type?.eq === "completed" && b.completedAt),
+    "recently-completed work is windowed by completedAt",
+  );
+  assert.ok(
+    branches.some((b) => b.state?.type?.eq === "canceled" && !b.completedAt),
+    "canceled work is matched with no time window",
+  );
+});
+
+test("findSimilarOpen matches a near-identical title", async () => {
+  const { adapter } = fakeQueryAdapter([{ title: "Fix the flaky login test" }]);
+  const hits = await adapter.findSimilarOpen("Fix the flaky login test");
+  assert.equal(hits.length, 1);
+});
+
+test("findSimilarOpen ignores an unrelated title", async () => {
+  const { adapter } = fakeQueryAdapter([{ title: "Fix the flaky login test" }]);
+  const hits = await adapter.findSimilarOpen("Add dark mode to settings");
+  assert.equal(hits.length, 0);
+});

@@ -37,6 +37,16 @@ export function requestStop(): void {
 
 let lastIdleLog = 0;
 
+/**
+ * Notified on every idle tick with how long the executor has been continuously
+ * idle. The supervisor uses this to pull proposers in early; nothing else
+ * depends on it, so a missing handler just means the old behaviour.
+ */
+let onIdle: ((idleMs: number, backlog: number) => void) | null = null;
+export function setIdleHandler(h: ((idleMs: number, backlog: number) => void) | null): void {
+  onIdle = h;
+}
+
 /** Compute back-off ms from a parsed reset time, else the configured default. */
 export function backoffMs(resetAt: string | null | undefined, defaultMinutes: number): number {
   if (resetAt) {
@@ -64,15 +74,22 @@ export async function runExecutorLoop(
     wipCap: cfg.gates.wipCap,
   });
 
+  // When the current dry spell started, or null if the executor isn't idle.
+  // Paused and WIP-capped are deliberately *not* idle: there is work, it just
+  // isn't runnable right now, and proposing more wouldn't help.
+  let idleSince: number | null = null;
+
   while (!stopped) {
     try {
       if (paused) {
+        idleSince = null;
         await sleepInterruptible(cfg.budget.pollSeconds * 1000);
         continue;
       }
 
       const inProgress = await ports.linear.countInProgress();
       if (inProgress >= cfg.gates.wipCap) {
+        idleSince = null;
         await sleepInterruptible(cfg.budget.pollSeconds * 1000);
         continue;
       }
@@ -84,26 +101,37 @@ export async function runExecutorLoop(
         logger.warn(`usage limited; backing off ${Math.round(ms / 60000)}m`, {
           resetAt: outcome.resetAt ?? null,
         });
+        // Not idle — we're rate-limited, and there may well be work waiting.
+        // Leaving idleSince set would make the long sleep look like a dry spell
+        // and fire every idle proposer the moment the window reopens.
+        idleSince = null;
         await sleep(ms); // not interruptible: waking would just re-hit the limit
       } else if (outcome.status === "idle") {
-        // Explain the idle, throttled to ~5 min, so it's never a silent mystery.
         const now = Date.now();
+        if (idleSince === null) idleSince = now;
+
+        let backlog = 0;
+        try {
+          backlog = await ports.linear.countBacklog();
+        } catch {
+          /* ignore — treated as an empty backlog for logging and idle triggers */
+        }
+
+        // Explain the idle, throttled to ~5 min, so it's never a silent mystery.
         if (now - lastIdleLog > 5 * 60 * 1000) {
           lastIdleLog = now;
-          let backlog = 0;
-          try {
-            backlog = await ports.linear.countBacklog();
-          } catch {
-            /* ignore */
-          }
           logger.info(
             `executor idle: no ready work in "${cfg.linear.statuses.ready}" ` +
               `(labeled type:task/bug/chore-dx). ${backlog} in "${cfg.linear.statuses.backlog}". ` +
               `Move an item to "${cfg.linear.statuses.ready}" + add a type label, then press i.`,
           );
         }
+
+        onIdle?.(now - idleSince, backlog);
         await sleepInterruptible(cfg.budget.pollSeconds * 1000);
       } else {
+        // Real work happened, so the next dry spell is a fresh one.
+        idleSince = null;
         await sleep(2000); // did work; brief pause before the next claim
       }
     } catch (e) {

@@ -110,6 +110,28 @@ export const configSchema = z.object({
       cadence: z.string().default("0 * * * *"),
       dedupThreshold: z.number().min(0).max(1).default(0.85),
       backlogCap: z.number().int().min(1).default(30),
+      // How far back completed work still blocks a near-identical proposal.
+      // Canceled work blocks regardless of age — see findSimilarOpen.
+      dedupLookbackDays: z.number().int().min(0).default(30),
+    })
+    .default({}),
+  // Pull proposers in early when the executor has nothing to do, instead of
+  // leaving the team idle until the next cron tick.
+  idle: z
+    .object({
+      enabled: z.boolean().default(true),
+      // How long the executor must be continuously idle before triggering.
+      afterMinutes: z.number().int().min(1).default(10),
+      // Floor on how often any one proposer runs, across cron and idle alike.
+      minIntervalMinutes: z.number().int().min(1).default(30),
+      // Skip idle triggers while the backlog is this deep: work is already
+      // waiting on a human to promote it, so proposing more doesn't help.
+      maxBacklog: z.number().int().min(0).default(0),
+      // Give up after this many consecutive idle runs that file nothing, until
+      // something on the board actually changes.
+      maxEmptyRuns: z.number().int().min(1).default(3),
+      // Which proposers to pull in; empty = every scheduled proposer.
+      agents: z.array(z.string()).default([]),
     })
     .default({}),
 });

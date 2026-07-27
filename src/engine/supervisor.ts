@@ -3,7 +3,13 @@ import readline from "node:readline";
 import type { CrewConfig, Logger, PersonaName } from "../types.js";
 import type { Ports } from "./ports.js";
 import { proposerCycle } from "./cycles.js";
-import { runExecutorLoop, requestStop, wakeExecutor, setPaused } from "./loop.js";
+import {
+  runExecutorLoop,
+  requestStop,
+  wakeExecutor,
+  setPaused,
+  setIdleHandler,
+} from "./loop.js";
 import { killActiveRuns } from "../personas/runner.js";
 import { readState, writeState } from "../util/state.js";
 import { scheduledAgents } from "../agent/agents.js";
@@ -117,6 +123,54 @@ export function dueOnStartup(
   return now - t >= scheduleInterval(cadence);
 }
 
+/** Inputs to the idle-trigger decision. Pure, so the rules are testable. */
+export interface IdleDecisionInput {
+  /** How long the executor has been continuously idle. */
+  idleMs: number;
+  /** Items sitting in the backlog state. */
+  backlog: number;
+  /** Consecutive idle runs that filed nothing. */
+  emptyRuns: number;
+  /** Backlog depth when we last gave up, if we have. */
+  gaveUpAtBacklog: number | null;
+  paused: boolean;
+  /** Already running an idle-triggered proposer. */
+  running: boolean;
+}
+
+export type IdleDecision =
+  | { run: false; reason: string }
+  | { run: true; clearedLatch: boolean };
+
+/**
+ * Decide whether an idle tick should pull a proposer in early.
+ *
+ * The give-up latch (`emptyRuns >= maxEmptyRuns`) is what stops a runaway loop:
+ * if idle runs keep filing nothing, we stop paying for them. It clears when the
+ * backlog depth differs from where we gave up, since that means the board moved
+ * and there's genuinely new ground to cover.
+ */
+export function decideIdleRun(
+  input: IdleDecisionInput,
+  cfg: { afterMinutes: number; maxBacklog: number; maxEmptyRuns: number },
+): IdleDecision {
+  if (input.paused) return { run: false, reason: "paused" };
+  if (input.running) return { run: false, reason: "already running" };
+  if (input.idleMs < cfg.afterMinutes * 60_000) {
+    return { run: false, reason: "not idle long enough" };
+  }
+  if (input.backlog > cfg.maxBacklog) {
+    return { run: false, reason: "backlog needs promoting, not deepening" };
+  }
+  if (input.emptyRuns >= cfg.maxEmptyRuns) {
+    if (input.gaveUpAtBacklog !== null && input.backlog === input.gaveUpAtBacklog) {
+      return { run: false, reason: "gave up; board unchanged" };
+    }
+    return { run: true, clearedLatch: true };
+  }
+  return { run: true, clearedLatch: false };
+}
+
 /** Build the control legend from the dynamically-assigned agent keys. */
 export function buildLegend(keys: Map<string, PersonaName>): string {
   const agents = [...keys.entries()].map(([k, n]) => `[${k}]${n}`).join("  ");
@@ -150,27 +204,52 @@ export async function runSupervised(
     .sort((a, b) => a.name.localeCompare(b.name));
   const keys = assignKeys(scheduled.map((a) => a.name));
 
+  /** Ms since a proposer last completed; Infinity if it never has. */
+  const sinceLastRun = (name: PersonaName): number => {
+    const t = Date.parse(state.lastRun[name] ?? "");
+    return Number.isNaN(t) ? Infinity : Date.now() - t;
+  };
+
+  /**
+   * Run a proposer, unless it ran too recently. `manual` (a hotkey) bypasses the
+   * throttle — you asked for it explicitly. Returns how many items it filed, so
+   * the idle trigger can tell a productive run from an empty one.
+   *
+   * This is the single choke point for every proposer run — cron, catch-up,
+   * hotkey, and idle all land here, so one throttle governs them all rather than
+   * cron and idle each keeping their own clock and doubling up.
+   */
   const runProposerSafe = async (
     name: PersonaName,
     manual = false,
-  ): Promise<void> => {
-    if (teamPaused && !manual) return;
+  ): Promise<number> => {
+    if (teamPaused && !manual) return 0;
     if (!ports.agents[name]) {
       logger.warn(`${name}: not enabled (no personas/${name}.md); ignoring`);
-      return;
+      return 0;
     }
     if (busy.has(name)) {
       logger.info(`${name}: previous run still going; skipping`);
-      return;
+      return 0;
+    }
+    if (!manual && sinceLastRun(name) < cfg.idle.minIntervalMinutes * 60_000) {
+      logger.info(
+        `${name}: ran ${Math.round(sinceLastRun(name) / 60_000)}m ago ` +
+          `(minIntervalMinutes=${cfg.idle.minIntervalMinutes}); skipping`,
+      );
+      return 0;
     }
     busy.add(name);
     try {
       const out = await proposerCycle(cfg, ports, name, logger);
-      logger.info(`${name} finished`, { status: out.status, filed: out.created?.length ?? 0 });
+      const filed = out.created?.length ?? 0;
+      logger.info(`${name} finished`, { status: out.status, filed });
       state.lastRun[name] = new Date().toISOString();
       writeState(cfg.configDir, state);
+      return filed;
     } catch (e) {
       logger.error(`${name} run failed`, { error: String(e) });
+      return 0;
     } finally {
       busy.delete(name);
     }
@@ -181,9 +260,9 @@ export async function runSupervised(
     for (const a of scheduled) {
       let job: Cron;
       try {
-        job = new Cron(a.cadence, { name: a.name, protect: true }, () =>
-          runProposerSafe(a.name),
-        );
+        job = new Cron(a.cadence, { name: a.name, protect: true }, () => {
+          void runProposerSafe(a.name);
+        });
       } catch (e) {
         logger.error(`${a.name}: invalid cadence "${a.cadence}"; not scheduled`, {
           error: String(e),
@@ -201,12 +280,98 @@ export async function runSupervised(
     logger.info("proposers disabled (--no-proposers); executor only");
   }
 
+  // --- idle-triggered proposers -----------------------------------------------
+  // When the executor runs dry, pull a proposer in early rather than waiting for
+  // its next cron tick. One agent at a time, oldest-run first: as soon as one
+  // files something the executor stops being idle, so firing the whole roster
+  // would just dump every agent's proposals into an empty backlog at once.
+  const idlePool = cfg.idle.agents.length
+    ? scheduled.filter((a) => cfg.idle.agents.includes(a.name))
+    : scheduled;
+  /** Consecutive idle-triggered runs that filed nothing. */
+  let emptyIdleRuns = 0;
+  let idleRunning = false;
+  /**
+   * Backlog depth when we last gave up. If it changes, something happened on the
+   * board (you filed, promoted, or closed something) and the agents have new
+   * ground to cover — so the give-up latch clears rather than needing a restart.
+   */
+  let gaveUpAtBacklog: number | null = null;
+
+  if (cfg.idle.enabled && opts.proposers && idlePool.length) {
+    const unknown = cfg.idle.agents.filter((n) => !scheduled.some((a) => a.name === n));
+    if (unknown.length) {
+      logger.warn(`idle.agents names no scheduled proposer: ${unknown.join(", ")}`);
+    }
+
+    setIdleHandler((idleMs, backlog) => {
+      const decision = decideIdleRun(
+        {
+          idleMs,
+          backlog,
+          emptyRuns: emptyIdleRuns,
+          gaveUpAtBacklog,
+          paused: teamPaused,
+          running: idleRunning,
+        },
+        cfg.idle,
+      );
+      if (!decision.run) return;
+      if (decision.clearedLatch) {
+        logger.info("board changed since idle proposers gave up; trying again");
+        emptyIdleRuns = 0;
+        gaveUpAtBacklog = null;
+      }
+
+      // Oldest first, so the roster rotates instead of one agent monopolizing.
+      // Never-run agents are all Infinity, and Infinity - Infinity is NaN, so
+      // compare before subtracting — otherwise a fleet of fresh agents sorts
+      // arbitrarily instead of falling back to name order.
+      const next = [...idlePool]
+        .filter((a) => !busy.has(a.name))
+        .sort((a, b) => {
+          const [sa, sb] = [sinceLastRun(a.name), sinceLastRun(b.name)];
+          if (sa !== sb) return sb - sa;
+          return a.name.localeCompare(b.name);
+        })[0];
+      if (!next) return;
+      if (sinceLastRun(next.name) < cfg.idle.minIntervalMinutes * 60_000) return;
+
+      idleRunning = true;
+      logger.info(
+        `idle ${Math.round(idleMs / 60_000)}m with an empty queue; running ${next.name} early`,
+      );
+      void runProposerSafe(next.name)
+        .then((filed) => {
+          if (filed > 0) {
+            emptyIdleRuns = 0;
+            wakeExecutor(); // new work is ready — don't wait out the poll interval
+            return;
+          }
+          emptyIdleRuns++;
+          if (emptyIdleRuns >= cfg.idle.maxEmptyRuns) {
+            gaveUpAtBacklog = backlog;
+            logger.warn(
+              `idle proposers filed nothing ${emptyIdleRuns} runs in a row; pausing idle ` +
+                `triggers until the board changes. They still run on their normal cadence.`,
+            );
+          }
+        })
+        .finally(() => {
+          idleRunning = false;
+        });
+    });
+  } else if (cfg.idle.enabled && opts.proposers) {
+    logger.info("idle triggers enabled but no proposers to run");
+  }
+
   // --- shutdown ---------------------------------------------------------------
   let down = false;
   const shutdown = (sig: string): void => {
     if (down) return;
     down = true;
     logger.info(`${sig}; stopping after current work`);
+    setIdleHandler(null);
     for (const j of jobs) j.stop();
     if (process.stdin.isTTY) {
       try {
@@ -299,6 +464,7 @@ export async function runSupervised(
 
   // --- run the executor (blocks until stopped) --------------------------------
   await runExecutorLoop(cfg, ports, logger);
+  setIdleHandler(null); // module-level: don't leak this run's closure into the next
   for (const j of jobs) j.stop();
   if (process.stdin.isTTY) {
     try {

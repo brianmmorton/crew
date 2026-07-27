@@ -366,19 +366,46 @@ export class LinearAdapter implements LinearPort {
     return created;
   }
 
+  /**
+   * Dedup candidates: everything still open, plus work that is already done or
+   * was rejected.
+   *
+   * Completed work only counts for a window (`dedupLookbackDays`) — a bug fixed
+   * a year ago can legitimately regress and should be re-filable. Canceled work
+   * has no window: canceling an issue is how a human says "don't do this", and
+   * that answer doesn't expire on a timer.
+   *
+   * Without this, an idle-triggered proposer re-files work that just shipped,
+   * autoPromote sends it straight to the ready state, the executor drains it,
+   * and the queue empties again — a loop that sustains itself.
+   */
   async findSimilarOpen(title: string): Promise<WorkItem[]> {
     this.ensureMeta();
     const team = this.ensureTeam();
 
+    const since = new Date(
+      Date.now() - this.cfg.triager.dedupLookbackDays * 24 * 60 * 60 * 1000,
+    );
+
     const conn = await team.issues({
       filter: {
-        state: { type: { nin: ["completed", "canceled"] } },
+        or: [
+          { state: { type: { nin: ["completed", "canceled"] } } },
+          // Recently shipped — don't rebuild it.
+          {
+            state: { type: { eq: "completed" } },
+            completedAt: { gte: since },
+          },
+          // Explicitly rejected — don't re-propose it, ever.
+          { state: { type: { eq: "canceled" } } },
+        ],
         ...this.projectFilter(),
       },
       first: PAGE,
     });
 
-    const matches = conn.nodes.filter((i) => isDuplicate(title, i.title, DEDUP_THRESHOLD));
+    const threshold = this.cfg.triager.dedupThreshold ?? DEDUP_THRESHOLD;
+    const matches = conn.nodes.filter((i) => isDuplicate(title, i.title, threshold));
     return Promise.all(matches.map((i) => this.toWorkItem(i)));
   }
 
