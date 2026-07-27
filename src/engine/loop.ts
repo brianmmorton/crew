@@ -87,7 +87,7 @@ export async function runExecutorLoop(
         continue;
       }
 
-      const inProgress = await ports.linear.countInProgress();
+      const inProgress = await ports.tracker.countInProgress();
       if (inProgress >= cfg.gates.wipCap) {
         idleSince = null;
         await sleepInterruptible(cfg.budget.pollSeconds * 1000);
@@ -112,7 +112,7 @@ export async function runExecutorLoop(
 
         let backlog = 0;
         try {
-          backlog = await ports.linear.countBacklog();
+          backlog = await ports.tracker.countBacklog();
         } catch {
           /* ignore — treated as an empty backlog for logging and idle triggers */
         }
@@ -121,9 +121,9 @@ export async function runExecutorLoop(
         if (now - lastIdleLog > 5 * 60 * 1000) {
           lastIdleLog = now;
           logger.info(
-            `executor idle: no ready work in "${cfg.linear.statuses.ready}" ` +
-              `(labeled type:task/bug/chore-dx). ${backlog} in "${cfg.linear.statuses.backlog}". ` +
-              `Move an item to "${cfg.linear.statuses.ready}" + add a type label, then press i.`,
+            `executor idle: no ready work in "${cfg.tracker.statuses.ready}" ` +
+              `(labeled type:task/bug/chore-dx). ${backlog} in "${cfg.tracker.statuses.backlog}". ` +
+              `Move an item to "${cfg.tracker.statuses.ready}" + add a type label, then press i.`,
           );
         }
 

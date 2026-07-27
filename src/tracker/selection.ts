@@ -13,7 +13,7 @@ const EXECUTABLE_TYPES: ReadonlySet<ItemType> = new Set<ItemType>([
  * (parentApproved === false). A null or true parentApproved is OK.
  */
 export function isExecutable(item: WorkItem, cfg: CrewConfig): boolean {
-  if (item.stateName !== cfg.linear.statuses.ready) return false;
+  if (item.stateName !== cfg.tracker.statuses.ready) return false;
   if (item.type === null || !EXECUTABLE_TYPES.has(item.type)) return false;
   if (item.parentApproved === false) return false;
   return true;

@@ -142,7 +142,7 @@ ${constitution}
 # You are READ-ONLY
 
 Do not modify, commit, or push anything. Do not comment on the PR yourself and
-do not touch Linear — the engine performs every action from your JSON below.
+do not touch the issue tracker — the engine performs every action from your JSON below.
 
 # Required output format
 
@@ -152,7 +152,7 @@ End your response with a single fenced JSON block and nothing after it:
 {
   "verdict": "approve | comment | changes-requested",
   "prComment": "markdown posted as a comment on the pull request (omit for none)",
-  "issueComment": "markdown posted on the Linear issue (omit for none)",
+  "issueComment": "markdown posted on the tracker issue (omit for none)",
   "transitionTo": "workflow state name (see below)",
   "proposals": []
 }

@@ -95,7 +95,7 @@ function reviewPorts(): { ports: Ports; rec: Recorded } {
         rec.prComments.push(body);
       },
     },
-    linear: {
+    tracker: {
       addComment: async (_id: string, body: string) => {
         rec.issueComments.push(body);
       },
@@ -108,7 +108,7 @@ function reviewPorts(): { ports: Ports; rec: Recorded } {
 }
 
 const item = { id: "i1", identifier: "ABC-1", title: "t" } as WorkItem;
-const cfg = { linear: { statuses: { ready: "Todo" } } } as unknown as CrewConfig;
+const cfg = { tracker: { statuses: { ready: "Todo" } } } as unknown as CrewConfig;
 
 async function review(
   def: AgentDef,
@@ -179,7 +179,7 @@ test("moving an item back to the ready state warns about rework", async () => {
   const logger: Logger = { ...silent, warn: (m) => warnings.push(m) };
   const { ports, rec } = reviewPorts();
   await applyReview(
-    { linear: { statuses: { ready: "Todo" } } } as unknown as CrewConfig,
+    { tracker: { statuses: { ready: "Todo" } } } as unknown as CrewConfig,
     ports,
     agent({ kind: "reviewer", canTransitionTo: ["Todo"] }),
     item,
@@ -196,7 +196,7 @@ test("moving an item to a non-ready state does not warn about rework", async () 
   const logger: Logger = { ...silent, warn: (m) => warnings.push(m) };
   const { ports } = reviewPorts();
   await applyReview(
-    { linear: { statuses: { ready: "Todo" } } } as unknown as CrewConfig,
+    { tracker: { statuses: { ready: "Todo" } } } as unknown as CrewConfig,
     ports,
     agent({ kind: "reviewer", canTransitionTo: ["Blocked"] }),
     item,
@@ -215,7 +215,7 @@ test("a failing PR comment does not prevent the transition", async () => {
         throw new Error("gh exploded");
       },
     },
-    linear: {
+    tracker: {
       addComment: async (_id: string, b: string) => {
         rec.issueComments.push(b);
       },

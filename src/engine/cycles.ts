@@ -97,14 +97,14 @@ export interface CycleOutcome {
  * One executor cycle: claim the next executable issue, route it to the executor
  * agent that claims its labels (falling back to `implementer`), implement it in
  * an isolated worktree, gate on no-touch + verify, and open a PR. The engine —
- * not the agent — owns every Linear transition and the git/PR work.
+ * not the agent — owns every tracker transition and the git/PR work.
  */
 export async function implementerCycle(
   cfg: CrewConfig,
   ports: Ports,
   logger: Logger,
 ): Promise<CycleOutcome> {
-  const item = await ports.linear.selectNextExecutable();
+  const item = await ports.tracker.selectNextExecutable();
   if (!item) return { status: "idle" };
 
   const all = Object.values(ports.agents);
@@ -118,11 +118,11 @@ export async function implementerCycle(
   }
 
   const branch = `agent/${item.identifier.toLowerCase()}`;
-  const S = cfg.linear.statuses;
+  const S = cfg.tracker.statuses;
   logger.info(`${exec.name} claimed ${item.identifier}`, { title: item.title });
 
-  await ports.linear.transition(item.id, S.inProgress);
-  await ports.linear.assign(item.id, ports.meta.myUserId);
+  await ports.tracker.transition(item.id, S.inProgress);
+  await ports.tracker.assign(item.id, ports.meta.myUserId);
 
   let wt: string | undefined;
   /**
@@ -132,8 +132,8 @@ export async function implementerCycle(
    */
   let preserve: string | null = null;
   const demote = async (note: string) => {
-    await ports.linear.addComment(item.id, `crew: ${note}`);
-    await ports.linear.transition(item.id, S.backlog);
+    await ports.tracker.addComment(item.id, `crew: ${note}`);
+    await ports.tracker.transition(item.id, S.backlog);
   };
 
   try {
@@ -196,8 +196,8 @@ export async function implementerCycle(
 
     if (res.usageLimited) {
       // Put the issue back so it's picked up again after the window reopens.
-      await ports.linear.transition(item.id, S.ready);
-      await ports.linear.assign(item.id, null);
+      await ports.tracker.transition(item.id, S.ready);
+      await ports.tracker.assign(item.id, null);
       return { status: "usage-limited", resetAt: res.resetAt ?? null };
     }
 
@@ -230,8 +230,8 @@ export async function implementerCycle(
     // worktree so the next cycle can retry landing it.
     if (wt && (await ports.git.hasCommits(wt).catch(() => false))) preserve = wt;
     try {
-      await ports.linear.transition(item.id, S.ready);
-      await ports.linear.assign(item.id, null);
+      await ports.tracker.transition(item.id, S.ready);
+      await ports.tracker.assign(item.id, null);
     } catch {
       /* best effort */
     }
@@ -264,7 +264,7 @@ async function landCommit(
   branch: string,
   logger: Logger,
 ): Promise<CycleOutcome> {
-  const S = cfg.linear.statuses;
+  const S = cfg.tracker.statuses;
 
   await ports.git.push(wt, branch);
   const url = await ports.git.openPr({
@@ -277,9 +277,9 @@ async function landCommit(
     label: "agent-authored",
   });
 
-  await ports.linear.transition(item.id, S.review);
-  await ports.linear.assign(item.id, ports.meta.myUserId);
-  await ports.linear.addComment(item.id, `crew: PR opened → ${url}`);
+  await ports.tracker.transition(item.id, S.review);
+  await ports.tracker.assign(item.id, ports.meta.myUserId);
+  await ports.tracker.addComment(item.id, `crew: PR opened → ${url}`);
   logger.info(`${exec.name} opened PR for ${item.identifier}`, { url });
 
   // Reviewers run against the pushed branch, before the worktree is removed.
@@ -310,8 +310,8 @@ async function reflect(
   });
   const parsed = res.friction ?? extractFriction(res.raw ?? "");
   for (const p of parsed) {
-    if ((await ports.linear.findSimilarOpen(p.title)).length) continue;
-    await ports.linear.createIssue(
+    if ((await ports.tracker.findSimilarOpen(p.title)).length) continue;
+    await ports.tracker.createIssue(
       { ...p, type: "chore-dx", isMaterial: false },
       { author: exec.name },
     );
@@ -340,7 +340,7 @@ export async function applyReview(
   }
 
   if (review.issueComment?.trim()) {
-    await ports.linear
+    await ports.tracker
       .addComment(item.id, `crew (${agent.name}): ${review.issueComment.trim()}`)
       .catch((e) => logger.warn(`${agent.name}: issue comment failed`, { error: String(e) }));
   }
@@ -354,13 +354,13 @@ export async function applyReview(
           `[${allowed.join(", ") || "none"}]`,
       );
     } else {
-      await ports.linear.transition(item.id, to);
+      await ports.tracker.transition(item.id, to);
       logger.info(`${agent.name}: moved ${item.identifier} → ${to}`);
       // Moving an item back to the ready state makes it executable again, so
       // the executor will rework it on the next tick. That's the intended
       // "needs rework" flow, but if the reviewer objects again it can cycle —
       // so it's called out loudly rather than silently burning usage.
-      if (to === cfg.linear.statuses.ready) {
+      if (to === cfg.tracker.statuses.ready) {
         logger.warn(
           `${agent.name}: ${item.identifier} is back in "${to}" and will be reworked ` +
             `by the executor. If this repeats, the PR is looping — intervene by hand.`,
@@ -412,19 +412,19 @@ async function runReviewers(
       // A reviewer may also file follow-up work. This mirrors proposerCycle:
       // same limits, same material gate, same auto-promote behaviour — so a
       // material follow-up lands in Needs Approval assigned to the human (who
-      // Linear then notifies) rather than sitting unassigned and unseen.
+      // the tracker then notifies) rather than sitting unassigned and unseen.
       const follow = enforceLimits(rev, res.proposals ?? extractProposals(res.raw ?? ""), logger);
       for (const p of follow) {
-        if ((await ports.linear.findSimilarOpen(p.title)).length) continue;
+        if ((await ports.tracker.findSimilarOpen(p.title)).length) continue;
         const material = p.isMaterial === true;
-        const created = await ports.linear.createIssue(
+        const created = await ports.tracker.createIssue(
           material ? { ...p, type: "prd" } : p,
           { author: rev.name, needsApproval: material, label: rev.label },
         );
         if (material) {
-          await ports.linear.assign(created.id, ports.meta.myUserId);
-        } else if (cfg.linear.autoPromote) {
-          await ports.linear.transition(created.id, cfg.linear.statuses.ready);
+          await ports.tracker.assign(created.id, ports.meta.myUserId);
+        } else if (cfg.tracker.autoPromote) {
+          await ports.tracker.transition(created.id, cfg.tracker.statuses.ready);
         }
         logger.info(`${rev.name} filed follow-up ${created.identifier}`, {
           title: p.title,
@@ -479,7 +479,7 @@ function extractFriction(raw: string): Proposal[] {
 /**
  * One proposer cycle (QA / Design / Architect): produce proposals, dedup them
  * against open issues, and create issues — material ones become PRDs in Needs
- * Approval, assigned to you so Linear notifies you.
+ * Approval, assigned to you so the tracker notifies you.
  */
 export async function proposerCycle(
   cfg: CrewConfig,
@@ -494,7 +494,7 @@ export async function proposerCycle(
   }
   const name = def.name;
 
-  if ((await ports.linear.countBacklog()) >= cfg.triager.backlogCap) {
+  if ((await ports.tracker.countBacklog()) >= cfg.triager.backlogCap) {
     logger.warn(`${name}: backlog at cap (${cfg.triager.backlogCap}); not filing new items`);
     return { status: "capped" };
   }
@@ -502,9 +502,9 @@ export async function proposerCycle(
   // The executor is saturated, so anything filed now just queues up behind work
   // that's already waiting. Skip the run rather than burn tokens deepening a
   // backlog nobody is draining.
-  if ((await ports.linear.countInProgress()) >= cfg.gates.wipCap) {
+  if ((await ports.tracker.countInProgress()) >= cfg.gates.wipCap) {
     logger.warn(
-      `${name}: executor at WIP cap (${cfg.gates.wipCap} in "${cfg.linear.statuses.inProgress}"); ` +
+      `${name}: executor at WIP cap (${cfg.gates.wipCap} in "${cfg.tracker.statuses.inProgress}"); ` +
         `not filing new items`,
     );
     return { status: "capped" };
@@ -527,26 +527,26 @@ export async function proposerCycle(
 
   const created: string[] = [];
   for (const p of enforceLimits(def, res.proposals ?? [], logger)) {
-    if ((await ports.linear.findSimilarOpen(p.title)).length) {
+    if ((await ports.tracker.findSimilarOpen(p.title)).length) {
       logger.info(`${name}: skipping duplicate "${p.title}"`);
       continue;
     }
     const material = p.isMaterial === true;
     const proposal: Proposal = material ? { ...p, type: "prd" } : p;
-    const item = await ports.linear.createIssue(proposal, {
+    const item = await ports.tracker.createIssue(proposal, {
       author: name,
       needsApproval: material,
       label: def.label,
     });
     if (material) {
-      await ports.linear.assign(item.id, ports.meta.myUserId);
-    } else if (cfg.linear.autoPromote) {
-      await ports.linear.transition(item.id, cfg.linear.statuses.ready);
+      await ports.tracker.assign(item.id, ports.meta.myUserId);
+    } else if (cfg.tracker.autoPromote) {
+      await ports.tracker.transition(item.id, cfg.tracker.statuses.ready);
     }
     created.push(item.identifier);
-    const where = material ? " (PRD, needs approval)" : cfg.linear.autoPromote ? " → Todo" : " → Backlog";
+    const where = material ? " (PRD, needs approval)" : cfg.tracker.autoPromote ? " → Todo" : " → Backlog";
     logger.info(`${name} filed ${item.identifier}${where}`, { title: p.title });
-    if ((await ports.linear.countBacklog()) >= cfg.triager.backlogCap) break;
+    if ((await ports.tracker.countBacklog()) >= cfg.triager.backlogCap) break;
   }
 
   return { status: "proposed", created };

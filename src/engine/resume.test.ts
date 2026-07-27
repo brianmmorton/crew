@@ -73,7 +73,7 @@ function harness(sim: Sim = {}) {
     configDir,
     project: "p",
     repo: { path: "/repo", baseBranch: "main" },
-    linear: {
+    tracker: {
       statuses: {
         backlog: "Backlog",
         ready: "Todo",
@@ -94,7 +94,7 @@ function harness(sim: Sim = {}) {
     meta: { myUserId: "U" },
     agents: { implementer: exec },
     constitution: "c",
-    linear: {
+    tracker: {
       selectNextExecutable: async () => item,
       transition: async (_id: string, to: string) => {
         rec.transitions.push(to);

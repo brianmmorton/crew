@@ -2,12 +2,12 @@ import type {
   AgentDef,
   CrewConfig,
   GitPort,
-  LinearMeta,
-  LinearPort,
   PersonaName,
   PersonaPort,
+  TrackerMeta,
+  TrackerPort,
 } from "../types.js";
-import { LinearAdapter } from "../linear/adapter.js";
+import { createTracker, TrackerAuthError } from "../tracker/factory.js";
 import { GitAdapter } from "../git/git.js";
 import { PersonaRunner } from "../personas/runner.js";
 import { loadConstitution } from "../config/load.js";
@@ -16,10 +16,11 @@ import { loadAgents } from "../agent/agents.js";
 
 /** Everything the engine cycles need, constructed once per process. */
 export interface Ports {
-  linear: LinearPort;
+  /** The configured issue tracker (Linear or Jira). */
+  tracker: TrackerPort;
   git: GitPort;
   persona: PersonaPort;
-  meta: LinearMeta;
+  meta: TrackerMeta;
   /** Every agent discovered for this project, keyed by name. */
   agents: Record<PersonaName, AgentDef>;
   constitution: string;
@@ -37,26 +38,30 @@ export function agentList(ports: Ports): AgentDef[] {
 
 export class PortsError extends Error {}
 
-/** Build and wire all ports from config + environment (LINEAR_API_KEY). */
+/**
+ * Build and wire all ports from config + environment. Which tracker gets built,
+ * and which credentials it needs, follows `tracker.provider`.
+ */
 export async function buildPorts(cfg: CrewConfig): Promise<Ports> {
   // Pull secrets from <crewDir>/.env or ~/.crew/env if not already in the shell.
   loadEnvFiles(cfg.configDir);
 
-  const apiKey = process.env.LINEAR_API_KEY;
-  if (!apiKey) {
-    throw new PortsError(
-      "LINEAR_API_KEY is not set. Put it (and CLAUDE_CODE_OAUTH_TOKEN) in " +
-        `${cfg.configDir}/.env or ~/.crew/env, or export it in your shell.`,
-    );
+  let tracker;
+  try {
+    tracker = createTracker(cfg);
+  } catch (e) {
+    // Re-raise as PortsError so callers keep treating credentials problems as
+    // a startup failure rather than an unexpected crash.
+    if (e instanceof TrackerAuthError) throw new PortsError(e.message);
+    throw e;
   }
 
-  const linear = new LinearAdapter(apiKey, cfg);
-  const meta = await linear.resolveMeta();
+  const meta = await tracker.resolveMeta();
   const git = new GitAdapter(cfg.repo.path, cfg.repo.baseBranch);
   const persona = new PersonaRunner(cfg);
 
   const agents: Record<PersonaName, AgentDef> = {};
   for (const a of loadAgents(cfg)) agents[a.name] = a;
 
-  return { linear, git, persona, meta, agents, constitution: loadConstitution(cfg) };
+  return { tracker, git, persona, meta, agents, constitution: loadConstitution(cfg) };
 }

@@ -59,8 +59,30 @@ export function loadConfig(startDir = process.cwd()): CrewConfig {
     );
   }
 
+  // `linear:` is the pre-Jira spelling of `tracker:`. Accept it verbatim so old
+  // configs keep working, but pin the provider to linear — a config written
+  // under that key predates the choice and can only have meant Linear.
+  const tracker = raw.tracker ?? (raw.linear ? { ...raw.linear, provider: "linear" as const } : null);
+  if (!tracker) {
+    throw new ConfigError(
+      `Invalid config in ${configPath}:\n` +
+        `  - tracker: Required (a \`tracker:\` block, or the older \`linear:\` block)`,
+    );
+  }
+  if (raw.tracker && raw.linear) {
+    throw new ConfigError(
+      `Invalid config in ${configPath}:\n` +
+        `  - tracker/linear: define only one — \`linear:\` is the old name for \`tracker:\`.`,
+    );
+  }
+
+  // `linear` is intentionally dropped from the resolved config: the engine reads
+  // `cfg.tracker` only, so leaving both would let them drift apart.
+  const { linear: _legacy, ...rest } = raw;
+
   return {
-    ...raw,
+    ...rest,
+    tracker,
     repo: { ...raw.repo, path: repoPath },
     configDir,
     constitutionPath,

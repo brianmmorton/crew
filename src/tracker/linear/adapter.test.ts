@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { LinearAdapter } from "./adapter.js";
-import type { CrewConfig, Proposal } from "../types.js";
+import type { CrewConfig, Proposal } from "../../types.js";
 
 /**
  * These exercise createIssue's label assembly against a fake Linear client.
@@ -11,7 +11,7 @@ import type { CrewConfig, Proposal } from "../types.js";
  */
 
 const cfg = {
-  linear: {
+  tracker: {
     labels: { prd: "type:prd", bug: "type:bug", task: "type:task", chore: "type:chore-dx" },
     statuses: { backlog: "Backlog", needsApproval: "Needs Approval" },
   },

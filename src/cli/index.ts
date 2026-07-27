@@ -57,7 +57,7 @@ function printSchedule(agents: AgentDef[]): void {
 const program = new Command();
 program
   .name("crew")
-  .description("Autonomous agent team: propose typed work into Linear, gate material changes behind human-approved PRDs, drain approved work into PRs.")
+  .description("Autonomous agent team: propose typed work into Linear or Jira, gate material changes behind human-approved PRDs, drain approved work into PRs.")
   .version("0.1.0");
 
 /** Recursively copy template tree into dest, never overwriting existing files. */
@@ -135,13 +135,17 @@ program
     const cfg = loadConfig();
     const ports = await buildPorts(cfg);
     const [backlog, inProgress] = await Promise.all([
-      ports.linear.countBacklog(),
-      ports.linear.countInProgress(),
+      ports.tracker.countBacklog(),
+      ports.tracker.countInProgress(),
     ]);
     const agents = Object.values(ports.agents).sort((a, b) => a.name.localeCompare(b.name));
     console.log(`project:      ${cfg.project}`);
     console.log(`repo:         ${cfg.repo.path} (base ${cfg.repo.baseBranch})`);
-    console.log(`linear team:  ${cfg.linear.team}${cfg.linear.project ? ` / project: ${cfg.linear.project}` : ""}`);
+    const scope = cfg.tracker.provider === "jira" ? "component" : "project";
+    console.log(
+      `tracker:      ${cfg.tracker.provider} — ${cfg.tracker.team}` +
+        `${cfg.tracker.project ? ` / ${scope}: ${cfg.tracker.project}` : ""}`,
+    );
     console.log(`backlog:      ${backlog}   (cap ${cfg.triager.backlogCap})`);
     console.log(`in progress:  ${inProgress} (WIP cap ${cfg.gates.wipCap})`);
     console.log(`agents:       ${agents.map((a) => a.name).join(", ") || "(none found)"}`);
@@ -160,7 +164,7 @@ program
     const cfg = loadConfig();
 
     // Resolve the agent from disk BEFORE building ports, so a typo fails
-    // instantly instead of behind a Linear credentials error.
+    // instantly instead of behind a tracker credentials error.
     const def = loadAgents(cfg).find((a) => a.name === name);
     if (!def) {
       const known = discoverPersonaFiles(cfg).join(", ") || "(none)";
@@ -313,7 +317,7 @@ function agentTemplate(
       `# allowedTypes: [bug, task]`,
       `# Cap how many items one run may file:`,
       `# maxProposals: 5`,
-      `# Tag everything this agent files, so you can filter it in Linear:`,
+      `# Tag everything this agent files, so you can filter it on your board:`,
       `# label: "agent:${name}"`,
     );
   } else if (kind === "executor") {

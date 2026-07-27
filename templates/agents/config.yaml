@@ -19,24 +19,63 @@ repo:
 agent:
   provider: "claude"
 
-linear:
-  team: "YOUR LINEAR TEAM"     # exact team name as it appears in Linear
-  # project: "My Repo"         # optional: scope this repo to one Linear project
-                               # (name or id). Lets many repos share one team on
-                               # the free plan and stay independent.
+# --- Issue tracker -----------------------------------------------------------
+# Where crew files work and reads it back. `provider` picks the adapter:
+#   linear  — needs LINEAR_API_KEY
+#   jira    — needs JIRA_HOST, JIRA_EMAIL, JIRA_API_TOKEN (Jira Cloud)
+# Put the credentials in .env (see .env.example).
+#
+# NOTE: this block used to be called `linear:`. That spelling still works and is
+# read as provider: linear — no need to change an existing config.
+tracker:
+  provider: "linear"
+
+  # Linear: the exact team name. Jira: the project KEY, e.g. "BRI".
+  team: "YOUR LINEAR TEAM"
+
+  # Optional scoping below the team, so several repos can share one team/project
+  # and stay independent. Linear: a project name or id. Jira: a component name.
+  # project: "My Repo"
+
+  # Type labels crew applies to everything it files. On Jira these are plain
+  # labels (no spaces allowed) and are created implicitly on first use.
   labels:
     prd: "type:prd"
     bug: "type:bug"
     task: "type:task"
     chore: "type:chore-dx"
+
+  # Workflow state names, exactly as they appear on your board. On Jira these
+  # must match real statuses in the project's workflow — crew checks at startup
+  # and tells you what's available if one is wrong.
   statuses:
     backlog: "Backlog"
     ready: "Todo"
     inProgress: "In Progress"
     review: "In Review"
-    needsApproval: "Needs Approval"   # add this status in Linear (unstarted type)
+    needsApproval: "Needs Approval"   # add this status to your workflow
     done: "Done"
   approvedStates: ["Todo", "In Progress", "In Review", "Done"]
+
+  # Jira-only. Ignored when provider is "linear".
+  jira:
+    # Jira requires a real issue type on every create (unlike Linear, where the
+    # type is only a label). Map crew's types onto types your project has.
+    issueTypes:
+      prd: "Task"
+      bug: "Bug"
+      task: "Task"
+      chore: "Task"
+    # Issue type for children created when a PRD is decomposed. Omit to reuse
+    # the mapping above. Set to "Subtask" if your project prefers real subtasks.
+    # subtaskIssueType: "Subtask"
+    # Set false if the priority field is disabled on your instance.
+    usePriority: true
+    priorities:
+      critical: "Highest"
+      high: "High"
+      medium: "Medium"
+      low: "Low"
 
 budget:
   target: max-monthly

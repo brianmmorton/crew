@@ -1,7 +1,8 @@
 # crew
 
 An autonomous agent team for any code repository. Role-specialized agents propose
-typed work into [Linear](https://linear.app), anything **material** is gated
+typed work into [Linear](https://linear.app) or [Jira](https://www.atlassian.com/software/jira),
+anything **material** is gated
 behind a human-approved PRD, and an executor drains approved work into pull
 requests — running on your machine against your own coding-agent CLI.
 
@@ -11,8 +12,8 @@ Each repo gets a small versioned `.crew/` folder describing how to run it.
 
 ## What it does
 
-crew turns a Linear board into a work queue that a small team of agents moves
-through, with you at two control points:
+crew turns your issue tracker's board into a work queue that a small team of
+agents moves through, with you at two control points:
 
 - **Proposers** (QA, Design, Architect) run on a schedule, read the repo
   read-only, and file typed issues — bugs, tasks, chores, or, for anything that
@@ -23,12 +24,13 @@ through, with you at two control points:
 - A **self-review** step after each task files developer-experience friction as
   follow-up chores, and dedup keeps the backlog from ballooning.
 
-Linear is the single source of truth; the agents are stateless workers and the
-engine owns every state transition, so the flow is deterministic and auditable.
+The tracker is the single source of truth; the agents are stateless workers and
+the engine owns every state transition, so the flow is deterministic and
+auditable.
 
 ## How it works
 
-Work items are Linear issues with a **type** (label), a **workflow state**, a
+Work items are tracker issues with a **type** (label), a **workflow state**, a
 **priority** (drives pickup order), and a **complexity** (selects which model
 implements it). The executor only works items in your *ready* state that carry a
 task/bug/chore label and aren't blocked by an unapproved PRD. Two gates are
@@ -41,7 +43,7 @@ project-defined verify command that must pass before a PR is opened.
 - **git** and the **GitHub CLI** (`gh`, authenticated) for branch/PR operations.
 - A **coding-agent CLI** — Claude Code (`claude`) by default, or another you
   configure.
-- A **Linear** account and a personal API key.
+- A **Linear** or **Jira Cloud** account, and an API token for it.
 
 Run `crew doctor` anytime to check these.
 
@@ -62,16 +64,56 @@ crew setup                       # an agent tailors .crew/ to this repo,
                                  # then sets up .env + .gitignore and checks prereqs
 git add .crew && git commit -m "chore: add crew config"
 
-# Put your secrets in .crew/.env (read automatically — no shell exports):
+# Put your secrets in .crew/.env (read automatically — no shell exports).
+# For Linear (the default):
 #   LINEAR_API_KEY           Linear → Settings → Security & access → API keys
+# For Jira Cloud (set tracker.provider: jira in config.yaml):
+#   JIRA_HOST                your-site.atlassian.net
+#   JIRA_EMAIL               the account the token belongs to
+#   JIRA_API_TOKEN           id.atlassian.com → Security → API tokens
+# For the agent:
 #   CLAUDE_CODE_OAUTH_TOKEN  for the Claude provider: run `claude setup-token`
 
 crew status                      # confirm it connects; shows the schedule
 crew run                         # run the whole team (Ctrl-C to stop)
 ```
 
-One-time in Linear: add a workflow status named **Needs Approval** (type
-*unstarted*). Type labels (`type:task`, etc.) are created automatically.
+One-time on your board: add a workflow status named **Needs Approval** (in
+Linear, of type *unstarted*). Type labels (`type:task`, etc.) are created
+automatically.
+
+### Using Jira
+
+Set the provider and point `team` at your project **key** (not its name):
+
+```yaml
+tracker:
+  provider: jira
+  team: "BRI"                # Jira project key
+  # project: "web"           # optional: a component, to scope one repo
+  statuses:                  # must match your workflow's real status names
+    backlog: "Backlog"
+    ready: "To Do"
+    inProgress: "In Progress"
+    review: "In Review"
+    needsApproval: "Needs Approval"
+    done: "Done"
+  jira:
+    issueTypes:              # must exist in the project
+      prd: "Task"
+      bug: "Bug"
+      task: "Task"
+      chore: "Task"
+```
+
+crew validates the statuses and issue types at startup and tells you what the
+project actually offers if one doesn't match. Two Jira details worth knowing:
+status changes go through workflow **transitions**, so a status is only reachable
+if your workflow has a path to it from where the issue sits; and descriptions are
+converted to Atlassian Document Format, so markdown renders as plain text.
+
+If your config still uses the older `linear:` block, it keeps working as-is —
+it's read as `tracker:` with `provider: linear`.
 
 ## Commands
 
@@ -107,8 +149,11 @@ of `config.yaml`:
 - **gates** — `verify` (per-app commands; empty = trust the agent + PR review),
   `setup` (an env-prep command run before verify), `noTouch` (paths agents must
   never modify), and `wipCap`.
-- **linear** — `team`, an optional `project` to scope this repo, workflow state
-  names, and `autoPromote` (non-material proposals go straight to ready).
+- **tracker** — `provider` (`linear` or `jira`), `team` (a Linear team name or a
+  Jira project key), an optional `project` to scope this repo (a Linear project
+  or a Jira component), workflow state names, `autoPromote` (non-material
+  proposals go straight to ready), and a `jira` block for Jira-specific issue
+  types and priorities. The older `linear:` spelling is still accepted.
 - **personas** — your agents; see below.
 
 The `.crew/` directory name can be overridden with the `CREW_DIR` env var.
@@ -124,7 +169,7 @@ drives it:
 |---|---|---|
 | `proposer` | on a cron cadence | Reads the repo read-only and files typed work items |
 | `executor` | whenever there's ready work | Implements one item in a worktree and opens a PR |
-| `reviewer` | after a PR is opened | Comments on the PR / Linear issue, can move the issue |
+| `reviewer` | after a PR is opened | Comments on the PR / tracker issue, can move the issue |
 
 Create one with the scaffolder, then edit the prompt it writes:
 
@@ -151,7 +196,7 @@ cadence: "0 8 * * 1"
 model: haiku
 allowedTypes: [bug]        # may only file bugs
 maxProposals: 3            # at most 3 per run
-label: "agent:a11y"        # tag its output so you can filter it in Linear
+label: "agent:a11y"        # tag its output so you can filter it on your board
 ---
 
 You are the accessibility agent. Audit for…
@@ -165,7 +210,7 @@ You are the accessibility agent. Audit for…
 | `description` | all | One-liner shown in `crew agents` |
 | `allowedTypes` | proposers, reviewers | Item types it may file; others are discarded |
 | `maxProposals` | proposers, reviewers | Cap on items filed per run |
-| `label` | proposers, reviewers | Extra Linear label on everything it files |
+| `label` | proposers, reviewers | Extra tracker label on everything it files |
 | `claims` | executors | Item labels that route work to this agent |
 | `canTransitionTo` | reviewers | Workflow states it may move an issue to |
 
@@ -184,7 +229,7 @@ agent runs at a time under the existing `wipCap`.
 
 A reviewer runs against the branch right after its PR opens. Like every other
 agent it performs no actions itself — it returns a verdict and the engine
-applies it: a comment on the PR, a comment on the Linear issue, follow-up items,
+applies it: a comment on the PR, a comment on the tracker issue, follow-up items,
 and a state transition *if* the target is listed in `canTransitionTo` (empty
 means comment-only). A reviewer that fails never blocks the PR.
 

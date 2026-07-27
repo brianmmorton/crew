@@ -66,26 +66,19 @@ export function detectUsageLimit(text: string): {
   return { limited: true, resetAt };
 }
 
-/** Return the substring of `s` covering the first balanced {...} or [...]. */
-function firstBalancedBlock(s: string): string | null {
-  let start = -1;
-  let open = "";
-  let close = "";
-  for (let i = 0; i < s.length; i++) {
-    const ch = s[i];
-    if (ch === "{" || ch === "[") {
-      start = i;
-      open = ch;
-      close = ch === "{" ? "}" : "]";
-      break;
-    }
-  }
-  if (start === -1) return null;
+/**
+ * Return the balanced {...} or [...] block starting at `from`, or null.
+ * `from` must index the opening bracket.
+ */
+function balancedBlockAt(s: string, from: number): string | null {
+  const open = s[from];
+  if (open !== "{" && open !== "[") return null;
+  const close = open === "{" ? "}" : "]";
 
   let depth = 0;
   let inString = false;
   let escaped = false;
-  for (let i = start; i < s.length; i++) {
+  for (let i = from; i < s.length; i++) {
     const ch = s[i];
     if (inString) {
       if (escaped) {
@@ -103,27 +96,91 @@ function firstBalancedBlock(s: string): string | null {
       depth++;
     } else if (ch === close) {
       depth--;
-      if (depth === 0) return s.slice(start, i + 1);
+      if (depth === 0) return s.slice(from, i + 1);
     }
   }
   return null;
 }
 
+/** Every balanced JSON-ish block in `s`, in order of appearance. */
+function balancedBlocks(s: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch !== "{" && ch !== "[") continue;
+    const block = balancedBlockAt(s, i);
+    if (block === null) continue;
+    out.push(block);
+    // Skip past this block; nested objects are part of the payload we captured.
+    i += block.length - 1;
+  }
+  return out;
+}
+
+/** The keys a persona payload is recognized by. */
+const PAYLOAD_KEYS = ["proposals", "friction", "verdict", "prComment", "issueComment", "transitionTo"];
+
+/** True if a parsed value carries at least one key the engine acts on. */
+function looksLikePayload(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length > 0;
+  if (!value || typeof value !== "object") return false;
+  return PAYLOAD_KEYS.some((k) => k in (value as Record<string, unknown>));
+}
+
 /**
- * Extract a JSON value embedded in a persona's free-form result text. Strips
- * markdown code fences and surrounding prose, then JSON.parses the first
- * balanced `{...}` or `[...]` block. Returns the parsed value, or `null` if
- * nothing parseable is found.
+ * Extract the JSON payload embedded in a persona's free-form result text.
+ *
+ * Agents are asked to end with a single fenced JSON block, but they routinely
+ * write prose first — and that prose contains code. Taking the *first* bracket
+ * in the text is therefore wrong: a sentence mentioning `|| []` or
+ * `state?.features` yields an empty `[]`/`{}` that parses fine, so the real
+ * payload further down is never seen and the run silently files nothing.
+ *
+ * The strategy, in order:
+ *  1. Fenced ```json blocks, last first — the requested format, and the last
+ *     one wins because agents illustrate *examples* earlier in their prose.
+ *  2. Any balanced block that actually looks like a payload (`proposals`,
+ *     `friction`, or a reviewer verdict key), again last first.
+ *  3. As a final fallback, the whole text — for a reply that is bare JSON.
+ *
+ * Returns the parsed value, or `null` if nothing parseable is found.
  */
 export function extractProposalsJson(resultText: string): unknown {
-  // Remove code-fence markers (```json / ```) but keep their contents.
-  const defenced = resultText.replace(/```[a-zA-Z]*\n?/g, "").replace(/```/g, "");
+  const candidates: string[] = [];
 
-  const block = firstBalancedBlock(defenced);
-  const candidate = block ?? defenced.trim();
+  // 1. Contents of fenced blocks (```json … ``` or a bare ``` … ```).
+  for (const m of resultText.matchAll(/```[a-zA-Z]*\r?\n([\s\S]*?)```/g)) {
+    const inner = m[1].trim();
+    if (inner) candidates.push(inner);
+  }
+
+  // 2. Balanced blocks found in the de-fenced text.
+  const defenced = resultText.replace(/```[a-zA-Z]*\r?\n?/g, "").replace(/```/g, "");
+  candidates.push(...balancedBlocks(defenced));
+
+  // Prefer a real payload; among equals prefer the LAST, which is the block the
+  // agent ended on rather than an example it cited along the way.
+  let fallback: unknown = null;
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    const parsed = tryParse(candidates[i]);
+    if (parsed === undefined) continue;
+    if (looksLikePayload(parsed)) return parsed;
+    // Remember the last parseable non-payload in case nothing better shows up.
+    if (fallback === null) fallback = parsed;
+  }
+
+  // 3. The whole reply, for output that is bare JSON with no prose or fences.
+  const whole = tryParse(defenced.trim());
+  if (whole !== undefined && looksLikePayload(whole)) return whole;
+
+  return fallback;
+}
+
+/** JSON.parse that reports failure as `undefined` rather than throwing. */
+function tryParse(s: string): unknown {
   try {
-    return JSON.parse(candidate);
+    return JSON.parse(s);
   } catch {
-    return null;
+    return undefined;
   }
 }

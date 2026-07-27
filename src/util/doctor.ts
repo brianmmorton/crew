@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { CrewConfig, Logger } from "../types.js";
 import { loadEnvFiles } from "./env.js";
+import { REQUIRED_ENV } from "../tracker/factory.js";
 
 const pExecFile = promisify(execFile);
 
@@ -57,12 +58,15 @@ export async function runDoctor(
   const claude = await cmd("claude");
   checks.push({ name: "claude CLI", ...claude, hint: "install Claude Code" });
 
-  checks.push({
-    name: "LINEAR_API_KEY",
-    ok: !!process.env.LINEAR_API_KEY,
-    detail: process.env.LINEAR_API_KEY ? "set" : "missing",
-    hint: `add to ${cfg.configDir}/.env`,
-  });
+  // Credentials depend on which tracker this project drives.
+  for (const name of REQUIRED_ENV[cfg.tracker.provider]) {
+    checks.push({
+      name,
+      ok: !!process.env[name]?.trim(),
+      detail: process.env[name]?.trim() ? "set" : "missing",
+      hint: `add to ${cfg.configDir}/.env`,
+    });
+  }
   checks.push({
     name: "CLAUDE_CODE_OAUTH_TOKEN",
     ok: !!process.env.CLAUDE_CODE_OAUTH_TOKEN,

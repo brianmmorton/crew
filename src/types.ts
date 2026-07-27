@@ -2,10 +2,14 @@
  * Shared contract for the crew engine.
  *
  * Design principle: agents are STATELESS workers, the engine owns ALL state.
- * - Proposer personas return `Proposal[]` (they never write to Linear).
- * - The Implementer persona returns a commit outcome (it never touches Linear).
- * - The engine (via LinearPort + GitPort) performs every Linear transition and
+ * - Proposer personas return `Proposal[]` (they never write to the tracker).
+ * - The Implementer persona returns a commit outcome (it never touches the tracker).
+ * - The engine (via TrackerPort + GitPort) performs every issue transition and
  *   git/PR operation deterministically.
+ *
+ * The engine is tracker-agnostic: it only ever talks to `TrackerPort`, which
+ * Linear and Jira each implement. Nothing outside `src/tracker/<provider>/`
+ * should know which tracker is in use.
  *
  * Every module implements one of the *Port interfaces below. This is the only
  * file modules should need to agree on.
@@ -80,7 +84,7 @@ export interface AgentDef {
   allowedTypes?: ItemType[];
   /** Max proposals accepted from one run (extras are dropped, with a warning). */
   maxProposals?: number;
-  /** Extra Linear label applied to everything this agent files. */
+  /** Extra tracker label applied to everything this agent files. */
   label?: string;
 
   // --- executor options ---
@@ -102,18 +106,18 @@ export type Severity = "low" | "medium" | "high" | "critical";
 
 export type Complexity = "low" | "medium" | "high";
 
-/** A normalized Linear issue as the engine sees it. */
+/** A normalized tracker issue as the engine sees it. */
 export interface WorkItem {
   id: string;
   /** Human key, e.g. "BRI-123". */
   identifier: string;
   title: string;
   description: string;
-  /** Derived from the type:* label; null if none. */
+  /** Derived from the type:* label (Jira: also the issue type); null if none. */
   type: ItemType | null;
   /** Current workflow state name, e.g. "Todo". */
   stateName: string;
-  /** Linear priority: 0 none, 1 urgent, 2 high, 3 normal, 4 low. */
+  /** Linear-style priority: 0 none, 1 urgent, 2 high, 3 normal, 4 low. */
   priority: number;
   /** Parent issue id (for PRD decomposition), else null. */
   parentId: string | null;
@@ -158,7 +162,7 @@ export interface ReviewOutcome {
   verdict?: "approve" | "comment" | "changes-requested";
   /** Markdown posted as a comment on the pull request. */
   prComment?: string;
-  /** Markdown posted as a comment on the Linear issue. */
+  /** Markdown posted as a comment on the tracker issue. */
   issueComment?: string;
   /** Workflow state to move the issue to; ignored unless on canTransitionTo. */
   transitionTo?: string;
@@ -186,27 +190,56 @@ export interface PersonaResult {
 
 // ----------------------------- config -------------------------------------
 
+/** Which issue tracker crew drives. */
+export type TrackerProvider = "linear" | "jira";
+
+/**
+ * Tracker settings, written as `tracker:` in config.yaml. The legacy `linear:`
+ * block is still accepted and mapped onto this at load time (see
+ * `src/config/load.ts`), so existing configs keep working unchanged.
+ */
+export interface TrackerConfig {
+  provider: TrackerProvider;
+  /** Linear: team name. Jira: project key (e.g. "BRI"). */
+  team: string;
+  /**
+   * Optional scoping within the team. Linear: a project name or id. Jira: a
+   * component name — issues crew creates get it, and queries filter on it.
+   */
+  project?: string;
+  labels: Record<"prd" | "bug" | "task" | "chore", string>;
+  statuses: {
+    backlog: string;
+    ready: string;
+    inProgress: string;
+    review: string;
+    needsApproval: string;
+    done: string;
+  };
+  /** State names considered "approved" for a parent PRD. */
+  approvedStates: string[];
+  /** Non-material proposals go straight to the ready state (default true). */
+  autoPromote: boolean;
+  /** Jira-only settings; ignored when provider is "linear". */
+  jira: {
+    /**
+     * Issue type names to create per item type. Jira requires a real issue type
+     * on every create, unlike Linear where the type is just a label.
+     */
+    issueTypes: Record<"prd" | "bug" | "task" | "chore", string>;
+    /** Issue type used for PRD children created by decomposition. */
+    subtaskIssueType?: string;
+    /** Set false for Jira instances where the priority field is disabled. */
+    usePriority: boolean;
+    /** Priority names, highest → lowest, mapped from Severity. */
+    priorities: Record<"critical" | "high" | "medium" | "low", string>;
+  };
+}
+
 export interface CrewConfig {
   project: string;
   repo: { path: string; baseBranch: string };
-  linear: {
-    team: string;
-    /** Optional Linear project (name or id) to scope this repo's issues to. */
-    project?: string;
-    labels: Record<"prd" | "bug" | "task" | "chore", string>;
-    statuses: {
-      backlog: string;
-      ready: string;
-      inProgress: string;
-      review: string;
-      needsApproval: string;
-      done: string;
-    };
-    /** State names considered "approved" for a parent PRD. */
-    approvedStates: string[];
-    /** Non-material proposals go straight to the ready state (default true). */
-    autoPromote: boolean;
-  };
+  tracker: TrackerConfig;
   budget: {
     target: "max-monthly" | "fixed";
     implementerWorkers: number;
@@ -267,20 +300,22 @@ export interface CrewConfig {
 
 // ----------------------------- ports --------------------------------------
 
-/** Resolved Linear identifiers so we don't re-query names every call. */
-export interface LinearMeta {
+/** Resolved tracker identifiers so we don't re-query names every call. */
+export interface TrackerMeta {
+  /** Linear: team id (uuid). Jira: the project key. */
   teamId: string;
+  /** Linear: viewer id. Jira: the authenticated account id. */
   myUserId: string;
-  /** label name -> id */
+  /** label name -> id. Jira labels are plain strings, so id === name there. */
   labelIds: Record<string, string>;
-  /** state name -> id */
+  /** state name -> id. Jira maps status name -> status id. */
   stateIds: Record<string, string>;
   /** Resolved project id, if the repo is scoped to a Linear project. */
   projectId?: string;
 }
 
-export interface LinearPort {
-  resolveMeta(): Promise<LinearMeta>;
+export interface TrackerPort {
+  resolveMeta(): Promise<TrackerMeta>;
 
   /**
    * The core selection query for the Implementer. Returns the single highest
@@ -329,6 +364,11 @@ export interface LinearPort {
   /** Mark as duplicate of another, with a link comment. */
   markDuplicate(issueId: string, ofIdentifier: string): Promise<void>;
 }
+
+/** @deprecated Use `TrackerMeta` — kept so older imports still compile. */
+export type LinearMeta = TrackerMeta;
+/** @deprecated Use `TrackerPort` — kept so older imports still compile. */
+export type LinearPort = TrackerPort;
 
 export interface OpenPrOptions {
   repoPath: string;

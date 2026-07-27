@@ -389,8 +389,8 @@ export async function runSupervised(
   // --- action handler ---------------------------------------------------------
   const printStatus = async (): Promise<void> => {
     const [backlog, inProgress] = await Promise.all([
-      ports.linear.countBacklog(),
-      ports.linear.countInProgress(),
+      ports.tracker.countBacklog(),
+      ports.tracker.countInProgress(),
     ]);
     logger.info(
       `status: backlog=${backlog} inProgress=${inProgress}/${cfg.gates.wipCap} ` +

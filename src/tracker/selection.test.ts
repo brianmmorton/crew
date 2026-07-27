@@ -4,7 +4,7 @@ import type { CrewConfig, ItemType, WorkItem } from "../types.js";
 import { isExecutable, rankCandidates } from "./selection.js";
 
 const cfg = {
-  linear: {
+  tracker: {
     statuses: {
       backlog: "Backlog",
       ready: "Todo",

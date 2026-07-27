@@ -1,5 +1,6 @@
 You are onboarding this repository to **crew** — an autonomous agent team that
-files typed work into Linear and turns approved tasks into pull requests. Help the
+files typed work into an issue tracker (Linear or Jira) and turns approved tasks
+into pull requests. Help the
 user set crew up for THIS specific project by analyzing the repo and tailoring the
 config in `.crew/`. Be efficient and concrete; don't lecture.
 
@@ -41,8 +42,8 @@ Keep it to a few questions; infer the rest.
   (app -> command); set `gates.setup` to whatever prepares the env before those
   checks (activate the pinned runtime / version manager, install deps), or leave
   it empty if nothing is needed; set `gates.noTouch` to the real sensitive paths;
-  enable/disable personas to match. Leave the Linear `team` and status names for
-  the user unless they tell you them.
+  enable/disable personas to match. Leave the `tracker` block — `provider`,
+  `team`, and the status names — for the user unless they tell you them.
 
 ## 4. Verify the project's tools are installed
 Check that the commands your setup/verify steps rely on actually exist on this
@@ -53,5 +54,8 @@ install it — don't assume it's there.
 ## 5. Constraints
 - Do NOT touch secrets or any `.env` file. Do NOT modify application code.
 - When done, print a short summary of what you wrote and exactly what the user
-  still needs to do by hand: set the Linear `team` in config.yaml, add the
-  "Needs Approval" status in Linear, and fill in `.crew/.env`.
+  still needs to do by hand: set `tracker.provider` and `tracker.team` in
+  config.yaml (a Linear team name, or a Jira project key), add the "Needs
+  Approval" status to their workflow, and fill in `.crew/.env` — `LINEAR_API_KEY`
+  for Linear, or `JIRA_HOST` + `JIRA_EMAIL` + `JIRA_API_TOKEN` for Jira. On Jira,
+  also point `tracker.jira.issueTypes` at issue types the project actually has.

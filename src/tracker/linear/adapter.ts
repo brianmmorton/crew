@@ -1,32 +1,33 @@
 import { LinearClient } from "@linear/sdk";
 import type { Issue, Team } from "@linear/sdk";
 import type {
-  Complexity,
   CrewConfig,
-  ItemType,
-  LinearMeta,
-  LinearPort,
   PersonaName,
   Proposal,
-  Severity,
+  TrackerMeta,
+  TrackerPort,
   WorkItem,
-} from "../types.js";
-import { isDuplicate } from "./dedup.js";
-import { isExecutable, rankCandidates } from "./selection.js";
+} from "../../types.js";
+import { isDuplicate } from "../dedup.js";
+import {
+  AGENT_AUTHORED_LABEL,
+  COMPLEXITY_PREFIX,
+  DEDUP_THRESHOLD,
+  complexityFromLabels,
+  labelNameToType,
+  severityToPriority,
+  typeToLabelName,
+} from "../shared.js";
+import { isExecutable, rankCandidates } from "../selection.js";
 
-/** Labels every agent-authored issue carries. */
-const AGENT_AUTHORED_LABEL = "agent-authored";
-/** Prefix for the complexity label (e.g. "complexity:high"). */
-const COMPLEXITY_PREFIX = "complexity:";
 /** Modest page size for the queries we run. */
 const PAGE = 250;
-const DEDUP_THRESHOLD = 0.85;
 
-export class LinearAdapter implements LinearPort {
+export class LinearAdapter implements TrackerPort {
   private readonly client: LinearClient;
   private readonly cfg: CrewConfig;
 
-  private meta: LinearMeta | null = null;
+  private meta: TrackerMeta | null = null;
   private team: Team | null = null;
   /** First canceled-type workflow state id, if any (for cancel/duplicate fallback). */
   private canceledStateId: string | null = null;
@@ -38,8 +39,8 @@ export class LinearAdapter implements LinearPort {
 
   // --------------------------- meta / guards ------------------------------
 
-  async resolveMeta(): Promise<LinearMeta> {
-    const teamName = this.cfg.linear.team;
+  async resolveMeta(): Promise<TrackerMeta> {
+    const teamName = this.cfg.tracker.team;
     const teamConn = await this.client.teams({
       filter: { name: { eq: teamName } },
       first: 10,
@@ -71,8 +72,8 @@ export class LinearAdapter implements LinearPort {
 
     // Optional project scoping: resolve the configured project by name or id.
     let projectId: string | undefined;
-    if (this.cfg.linear.project) {
-      const want = this.cfg.linear.project;
+    if (this.cfg.tracker.project) {
+      const want = this.cfg.tracker.project;
       const projConn = await team.projects({ first: PAGE });
       const proj = projConn.nodes.find((p) => p.name === want || p.id === want);
       if (!proj) {
@@ -90,7 +91,7 @@ export class LinearAdapter implements LinearPort {
     };
 
     // Ensure the configured type labels exist (create on the fly if missing).
-    const typeLabels = this.cfg.linear.labels;
+    const typeLabels = this.cfg.tracker.labels;
     for (const name of [typeLabels.prd, typeLabels.bug, typeLabels.task, typeLabels.chore]) {
       await this.ensureLabelId(name);
     }
@@ -98,7 +99,7 @@ export class LinearAdapter implements LinearPort {
     return this.meta;
   }
 
-  private ensureMeta(): LinearMeta {
+  private ensureMeta(): TrackerMeta {
     if (!this.meta) {
       throw new Error("LinearAdapter.resolveMeta() must be called before other methods");
     }
@@ -144,48 +145,6 @@ export class LinearAdapter implements LinearPort {
 
   // ----------------------------- mapping ----------------------------------
 
-  /** Reverse map: label name -> ItemType, derived from config. */
-  private labelNameToType(name: string): ItemType | null {
-    const l = this.cfg.linear.labels;
-    if (name === l.prd) return "prd";
-    if (name === l.bug) return "bug";
-    if (name === l.task) return "task";
-    if (name === l.chore) return "chore-dx";
-    return null;
-  }
-
-  /** Config label name for a proposal type ("spike" reuses the task label). */
-  private typeToLabelName(type: ItemType): string {
-    const l = this.cfg.linear.labels;
-    switch (type) {
-      case "prd":
-        return l.prd;
-      case "bug":
-        return l.bug;
-      case "task":
-        return l.task;
-      case "chore-dx":
-        return l.chore;
-      case "spike":
-        return l.task;
-    }
-  }
-
-  private static severityToPriority(severity: Severity | undefined): number {
-    switch (severity) {
-      case "critical":
-        return 1;
-      case "high":
-        return 2;
-      case "medium":
-        return 3;
-      case "low":
-        return 4;
-      default:
-        return 0;
-    }
-  }
-
   /** Resolve the SDK's async relations into a normalized WorkItem. */
   private async toWorkItem(issue: Issue): Promise<WorkItem> {
     const [state, parent, labelConn, assignee] = await Promise.all([
@@ -199,20 +158,13 @@ export class LinearAdapter implements LinearPort {
     if (parent) {
       const parentState = await parent.state;
       const name = parentState?.name ?? "";
-      parentApproved = this.cfg.linear.approvedStates.includes(name);
+      parentApproved = this.cfg.tracker.approvedStates.includes(name);
     }
 
     const labelNames = labelConn.nodes.map((l) => l.name);
     const type =
-      labelNames.map((n) => this.labelNameToType(n)).find((t) => t !== null) ?? null;
-
-    let complexity: Complexity | null = null;
-    for (const n of labelNames) {
-      if (n.startsWith(COMPLEXITY_PREFIX)) {
-        const v = n.slice(COMPLEXITY_PREFIX.length);
-        if (v === "low" || v === "medium" || v === "high") complexity = v;
-      }
-    }
+      labelNames.map((n) => labelNameToType(this.cfg.tracker, n)).find((t) => t !== null) ??
+      null;
 
     return {
       id: issue.id,
@@ -227,7 +179,7 @@ export class LinearAdapter implements LinearPort {
       url: issue.url,
       assigneeId: assignee?.id ?? null,
       labels: labelNames,
-      complexity,
+      complexity: complexityFromLabels(labelNames),
     };
   }
 
@@ -239,7 +191,7 @@ export class LinearAdapter implements LinearPort {
 
     const conn = await team.issues({
       filter: {
-        state: { name: { eq: this.cfg.linear.statuses.ready } },
+        state: { name: { eq: this.cfg.tracker.statuses.ready } },
         ...this.projectFilter(),
       },
       first: PAGE,
@@ -262,11 +214,11 @@ export class LinearAdapter implements LinearPort {
   }
 
   async countInProgress(): Promise<number> {
-    return this.countInState(this.cfg.linear.statuses.inProgress);
+    return this.countInState(this.cfg.tracker.statuses.inProgress);
   }
 
   async countBacklog(): Promise<number> {
-    return this.countInState(this.cfg.linear.statuses.backlog);
+    return this.countInState(this.cfg.tracker.statuses.backlog);
   }
 
   // --------------------------- mutations ----------------------------------
@@ -297,7 +249,7 @@ export class LinearAdapter implements LinearPort {
     // already add (e.g. label "agent:product" on the agent named "product", or
     // any "type:*") would otherwise fail every create it attempts.
     const labelNames = [
-      this.typeToLabelName(proposal.type),
+      typeToLabelName(this.cfg.tracker, proposal.type),
       AGENT_AUTHORED_LABEL,
       `agent:${opts.author}`,
     ];
@@ -318,8 +270,8 @@ export class LinearAdapter implements LinearPort {
     }
 
     const stateName = opts.needsApproval
-      ? this.cfg.linear.statuses.needsApproval
-      : this.cfg.linear.statuses.backlog;
+      ? this.cfg.tracker.statuses.needsApproval
+      : this.cfg.tracker.statuses.backlog;
     const stateId = this.stateIdOrThrow(stateName);
 
     const payload = await this.client.createIssue({
@@ -327,7 +279,7 @@ export class LinearAdapter implements LinearPort {
       title: proposal.title,
       description: proposal.body,
       labelIds,
-      priority: LinearAdapter.severityToPriority(proposal.severity),
+      priority: severityToPriority(proposal.severity),
       stateId,
       ...(meta.projectId ? { projectId: meta.projectId } : {}),
       ...(opts.parentId ? { parentId: opts.parentId } : {}),
@@ -342,17 +294,17 @@ export class LinearAdapter implements LinearPort {
 
   async createSubIssues(parentId: string, proposals: Proposal[]): Promise<WorkItem[]> {
     const meta = this.ensureMeta();
-    const stateId = this.stateIdOrThrow(this.cfg.linear.statuses.ready);
+    const stateId = this.stateIdOrThrow(this.cfg.tracker.statuses.ready);
 
     const created: WorkItem[] = [];
     for (const proposal of proposals) {
-      const typeLabelId = await this.ensureLabelId(this.typeToLabelName(proposal.type));
+      const typeLabelId = await this.ensureLabelId(typeToLabelName(this.cfg.tracker, proposal.type));
       const payload = await this.client.createIssue({
         teamId: meta.teamId,
         title: proposal.title,
         description: proposal.body,
         labelIds: [typeLabelId],
-        priority: LinearAdapter.severityToPriority(proposal.severity),
+        priority: severityToPriority(proposal.severity),
         stateId,
         ...(meta.projectId ? { projectId: meta.projectId } : {}),
         parentId,

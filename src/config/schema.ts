@@ -1,5 +1,71 @@
 import { z } from "zod";
 
+/**
+ * The tracker block. Written as `tracker:`; the legacy `linear:` key parses
+ * with this same shape and is folded into `tracker` at load time, so configs
+ * written before Jira support keep working untouched.
+ *
+ * `team` means the Linear team name or the Jira project key, and `project`
+ * means a Linear project or a Jira component — the two trackers name the same
+ * two levels of nesting differently, so the neutral field carries both.
+ */
+export const trackerSchema = z.object({
+  provider: z.enum(["linear", "jira"]).default("linear"),
+  team: z.string().min(1),
+  // Optional: scope this repo below the team (Linear project / Jira component)
+  // so many repos can share one team and stay independent.
+  project: z.string().optional(),
+  labels: z
+    .object({
+      prd: z.string().default("type:prd"),
+      bug: z.string().default("type:bug"),
+      task: z.string().default("type:task"),
+      chore: z.string().default("type:chore-dx"),
+    })
+    .default({}),
+  statuses: z
+    .object({
+      backlog: z.string().default("Backlog"),
+      ready: z.string().default("Todo"),
+      inProgress: z.string().default("In Progress"),
+      review: z.string().default("In Review"),
+      needsApproval: z.string().default("Needs Approval"),
+      done: z.string().default("Done"),
+    })
+    .default({}),
+  approvedStates: z
+    .array(z.string())
+    .default(["Todo", "In Progress", "In Review", "Done"]),
+  // Non-material proposals go straight to the ready state (executable). Set
+  // false to stage them in Backlog for manual promotion instead.
+  autoPromote: z.boolean().default(true),
+  // Jira-only. Jira demands a real issue type on every create (Linear treats
+  // the type as just a label), and its priority field can be disabled per
+  // instance — both have to be configurable per project.
+  jira: z
+    .object({
+      issueTypes: z
+        .object({
+          prd: z.string().default("Task"),
+          bug: z.string().default("Bug"),
+          task: z.string().default("Task"),
+          chore: z.string().default("Task"),
+        })
+        .default({}),
+      subtaskIssueType: z.string().optional(),
+      usePriority: z.boolean().default(true),
+      priorities: z
+        .object({
+          critical: z.string().default("Highest"),
+          high: z.string().default("High"),
+          medium: z.string().default("Medium"),
+          low: z.string().default("Low"),
+        })
+        .default({}),
+    })
+    .default({}),
+});
+
 /** Zod schema for <crewDir>/config.yaml. Mirrors CrewConfig (minus resolved fields). */
 export const configSchema = z.object({
   project: z.string().default("unnamed"),
@@ -7,36 +73,11 @@ export const configSchema = z.object({
     path: z.string().default("."),
     baseBranch: z.string().default("main"),
   }),
-  linear: z.object({
-    team: z.string().min(1),
-    // Optional: scope this repo to a single Linear project (name or id) so many
-    // repos can share one team on the free plan and stay independent.
-    project: z.string().optional(),
-    labels: z
-      .object({
-        prd: z.string().default("type:prd"),
-        bug: z.string().default("type:bug"),
-        task: z.string().default("type:task"),
-        chore: z.string().default("type:chore-dx"),
-      })
-      .default({}),
-    statuses: z
-      .object({
-        backlog: z.string().default("Backlog"),
-        ready: z.string().default("Todo"),
-        inProgress: z.string().default("In Progress"),
-        review: z.string().default("In Review"),
-        needsApproval: z.string().default("Needs Approval"),
-        done: z.string().default("Done"),
-      })
-      .default({}),
-    approvedStates: z
-      .array(z.string())
-      .default(["Todo", "In Progress", "In Review", "Done"]),
-    // Non-material proposals go straight to the ready state (executable). Set
-    // false to stage them in Backlog for manual promotion instead.
-    autoPromote: z.boolean().default(true),
-  }),
+  // Exactly one of these is required; `linear:` is the pre-Jira spelling and is
+  // normalized into `tracker` by loadConfig(). Both are optional here so the
+  // loader can raise a single clear error naming both spellings.
+  tracker: trackerSchema.optional(),
+  linear: trackerSchema.optional(),
   budget: z
     .object({
       target: z.enum(["max-monthly", "fixed"]).default("max-monthly"),
@@ -73,7 +114,7 @@ export const configSchema = z.object({
           .array(z.enum(["prd", "bug", "task", "chore-dx", "spike"]))
           .optional(),
         maxProposals: z.number().int().min(1).optional(),
-        // extra Linear label applied to everything this agent files
+        // extra tracker label applied to everything this agent files
         label: z.string().optional(),
         // executor: labels this agent claims (unclaimed work → implementer)
         claims: z.array(z.string()).optional(),

@@ -1,0 +1,429 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { JiraAdapter, jiraLabel } from "./adapter.js";
+import { JiraClient, adfToText, textToAdf, type FetchLike } from "./client.js";
+import type { CrewConfig, Proposal } from "../../types.js";
+
+/**
+ * These exercise the parts of the Jira adapter that have no Linear counterpart
+ * and therefore no existing coverage: status changes going through workflow
+ * transitions, the parent-approval gate when Jira omits the parent's status,
+ * and markdown <-> ADF round-tripping.
+ */
+
+const cfg = {
+  tracker: {
+    provider: "jira",
+    team: "BRI",
+    labels: { prd: "type:prd", bug: "type:bug", task: "type:task", chore: "type:chore-dx" },
+    statuses: {
+      backlog: "Backlog",
+      ready: "Todo",
+      inProgress: "In Progress",
+      review: "In Review",
+      needsApproval: "Needs Approval",
+      done: "Done",
+    },
+    approvedStates: ["Todo", "In Progress", "In Review", "Done"],
+    autoPromote: true,
+    jira: {
+      issueTypes: { prd: "Task", bug: "Bug", task: "Task", chore: "Task" },
+      usePriority: true,
+      priorities: { critical: "Highest", high: "High", medium: "Medium", low: "Low" },
+    },
+  },
+  triager: { dedupThreshold: 0.85, dedupLookbackDays: 30, backlogCap: 30 },
+} as unknown as CrewConfig;
+
+interface Call {
+  method: string;
+  path: string;
+  body?: unknown;
+}
+
+/**
+ * A fake Jira REST endpoint. `routes` maps "METHOD /path-prefix" to a response
+ * body; anything unmatched returns {} so a test only declares what it cares
+ * about.
+ */
+function fakeFetch(routes: Record<string, unknown>): {
+  fetchImpl: FetchLike;
+  calls: Call[];
+} {
+  const calls: Call[] = [];
+  const fetchImpl: FetchLike = async (url, init) => {
+    const method = init?.method ?? "GET";
+    const path = url.replace(/^https:\/\/[^/]+\/rest\/api\/3/, "");
+    const body = init?.body ? JSON.parse(init.body) : undefined;
+    calls.push({ method, path, body });
+
+    // Prefer an exact match, so "GET /issue/BRI-1" can't shadow
+    // "GET /issue/BRI-1/transitions"; fall back to longest prefix.
+    const candidates = Object.keys(routes).filter((k) => {
+      const [m, p] = k.split(" ");
+      return m === method && (path === p || path.startsWith(p));
+    });
+    const key = candidates.sort(
+      (a, b) => b.split(" ")[1].length - a.split(" ")[1].length,
+    )[0];
+    const payload = key ? routes[key] : {};
+    if (payload instanceof Error) {
+      return { ok: false, status: 400, text: async () => JSON.stringify({ errorMessages: [payload.message] }) };
+    }
+    // The removed /search endpoint now answers 410 — mirror that so a
+    // regression back onto it fails loudly here instead of in production.
+    if (path === "/search") {
+      return {
+        ok: false,
+        status: 410,
+        text: async () =>
+          JSON.stringify({
+            errorMessages: ["The requested API has been removed. Please migrate to the /rest/api/3/search/jql API."],
+          }),
+      };
+    }
+    return { ok: true, status: 200, text: async () => JSON.stringify(payload) };
+  };
+  return { fetchImpl, calls };
+}
+
+const auth = { host: "acme.atlassian.net", email: "a@b.c", apiToken: "t" };
+
+/** An adapter with `resolveMeta()` already satisfied, so tests skip discovery. */
+function primed(routes: Record<string, unknown>) {
+  const { fetchImpl, calls } = fakeFetch(routes);
+  const adapter = new JiraAdapter(auth, cfg, fetchImpl);
+  (adapter as unknown as { meta: unknown }).meta = {
+    teamId: "BRI",
+    myUserId: "acct-1",
+    labelIds: {},
+    stateIds: { Todo: "1", "In Progress": "2", Backlog: "3" },
+  };
+  return { adapter, calls };
+}
+
+// ----------------------------- transitions ---------------------------------
+
+test("transition resolves the target status to a workflow transition id", async () => {
+  const { adapter, calls } = primed({
+    "GET /issue/BRI-1/transitions": {
+      transitions: [
+        { id: "11", name: "Start", to: { id: "2", name: "In Progress" } },
+        { id: "21", name: "Done", to: { id: "9", name: "Done" } },
+      ],
+    },
+  });
+
+  await adapter.transition("BRI-1", "In Progress");
+
+  const post = calls.find((c) => c.method === "POST");
+  assert.equal(post?.path, "/issue/BRI-1/transitions");
+  assert.deepEqual(post?.body, { transition: { id: "11" } });
+});
+
+test("transition to the status an issue is already in is a no-op, not an error", async () => {
+  // Jira offers no transition to the current status, so a naive lookup fails.
+  // Retries after a partial failure depend on this being idempotent.
+  const { adapter, calls } = primed({
+    "GET /issue/BRI-1/transitions": { transitions: [] },
+    "GET /issue/BRI-1": { id: "1", key: "BRI-1", fields: { summary: "x", status: { id: "1", name: "Todo" } } },
+  });
+
+  await adapter.transition("BRI-1", "Todo");
+  assert.equal(calls.filter((c) => c.method === "POST").length, 0);
+});
+
+test("transition with no legal path reports what the workflow does allow", async () => {
+  const { adapter } = primed({
+    "GET /issue/BRI-1/transitions": {
+      transitions: [{ id: "11", name: "Start", to: { id: "2", name: "In Progress" } }],
+    },
+    "GET /issue/BRI-1": { id: "1", key: "BRI-1", fields: { summary: "x", status: { id: "1", name: "Todo" } } },
+  });
+
+  await assert.rejects(
+    () => adapter.transition("BRI-1", "Done"),
+    (e: Error) => e.message.includes("Start → In Progress") && e.message.includes('"Todo"'),
+  );
+});
+
+// -------------------------- parent approval gate ---------------------------
+
+test("selectNextExecutable blocks a child whose parent PRD is unapproved", async () => {
+  const { adapter } = primed({
+    "POST /search": null, // replaced per-call below
+  });
+
+  // Jira's search response carries `parent` but not the parent's status, so the
+  // adapter must fetch parents separately — that second query is what decides
+  // whether the item is gated.
+  let call = 0;
+  (adapter as unknown as { client: { search: unknown } }).client = {
+    search: async () => {
+      call++;
+      if (call === 1) {
+        return [
+          {
+            id: "1",
+            key: "BRI-10",
+            fields: {
+              summary: "child",
+              status: { id: "1", name: "Todo" },
+              labels: ["type:task"],
+              parent: { id: "9", key: "BRI-9" },
+            },
+          },
+        ];
+      }
+      return [{ id: "9", key: "BRI-9", fields: { summary: "prd", status: { id: "5", name: "Needs Approval" } } }];
+    },
+  };
+
+  assert.equal(await adapter.selectNextExecutable(), null);
+});
+
+test("selectNextExecutable allows a child whose parent PRD is approved", async () => {
+  const { adapter } = primed({});
+  let call = 0;
+  (adapter as unknown as { client: { search: unknown } }).client = {
+    search: async () => {
+      call++;
+      if (call === 1) {
+        return [
+          {
+            id: "1",
+            key: "BRI-10",
+            fields: {
+              summary: "child",
+              status: { id: "1", name: "Todo" },
+              labels: ["type:task"],
+              parent: { id: "9", key: "BRI-9" },
+            },
+          },
+        ];
+      }
+      return [{ id: "9", key: "BRI-9", fields: { summary: "prd", status: { id: "1", name: "Todo" } } }];
+    },
+  };
+
+  const item = await adapter.selectNextExecutable();
+  assert.equal(item?.identifier, "BRI-10");
+  assert.equal(item?.parentApproved, true);
+});
+
+test("an unresolvable parent status blocks the item rather than waving it through", async () => {
+  const { adapter } = primed({});
+  (adapter as unknown as { client: { search: unknown } }).client = {
+    search: async (jql: string) =>
+      jql.startsWith("key in")
+        ? [] // the parent lookup came back empty
+        : [
+            {
+              id: "1",
+              key: "BRI-10",
+              fields: {
+                summary: "child",
+                status: { id: "1", name: "Todo" },
+                labels: ["type:task"],
+                parent: { id: "9", key: "BRI-9" },
+              },
+            },
+          ],
+  };
+
+  assert.equal(await adapter.selectNextExecutable(), null);
+});
+
+// --------------------------- search / count API ----------------------------
+// Atlassian removed POST /search (CHANGE-2046); it answers 410. The replacement
+// pages by opaque token, returns no `total`, and rejects maxResults:0.
+
+test("search uses /search/jql, never the removed /search endpoint", async () => {
+  const { fetchImpl, calls } = fakeFetch({
+    "POST /search/jql": { issues: [{ id: "1", key: "BRI-1", fields: { summary: "a" } }], isLast: true },
+  });
+  const client = new JiraClient(auth, fetchImpl);
+
+  const out = await client.search("project = BRI");
+  assert.equal(out.length, 1);
+  assert.deepEqual(calls.map((c) => c.path), ["/search/jql"]);
+});
+
+test("count uses approximate-count, since /search/jql returns no total", async () => {
+  const { fetchImpl, calls } = fakeFetch({ "POST /search/approximate-count": { count: 42 } });
+  const client = new JiraClient(auth, fetchImpl);
+
+  assert.equal(await client.count("project = BRI"), 42);
+  assert.deepEqual(calls.map((c) => c.path), ["/search/approximate-count"]);
+});
+
+test("count never sends maxResults:0, which the API rejects as out of range", async () => {
+  const { fetchImpl, calls } = fakeFetch({ "POST /search/approximate-count": { count: 3 } });
+  await new JiraClient(auth, fetchImpl).count("project = BRI");
+  assert.equal(
+    calls.every((c) => (c.body as Record<string, unknown>)?.maxResults === undefined),
+    true,
+  );
+});
+
+test("search follows nextPageToken until isLast", async () => {
+  let page = 0;
+  const fetchImpl: FetchLike = async (_url, init) => {
+    page++;
+    const body = init?.body ? JSON.parse(init.body) : {};
+    const res =
+      page === 1
+        ? { issues: [{ id: "1", key: "BRI-1", fields: { summary: "a" } }], nextPageToken: "tok-2", isLast: false }
+        : { issues: [{ id: "2", key: "BRI-2", fields: { summary: "b" } }], isLast: true };
+    // The second request must echo the token from the first.
+    if (page === 2) assert.equal(body.nextPageToken, "tok-2");
+    return { ok: true, status: 200, text: async () => JSON.stringify(res) };
+  };
+
+  const out = await new JiraClient(auth, fetchImpl).search("project = BRI", { maxResults: 10 });
+  assert.deepEqual(out.map((i) => i.key), ["BRI-1", "BRI-2"]);
+});
+
+test("search stops at the requested limit instead of paging forever", async () => {
+  // A server that always claims there is another page: only `maxResults` ends it.
+  const fetchImpl: FetchLike = async () => ({
+    ok: true,
+    status: 200,
+    text: async () =>
+      JSON.stringify({
+        issues: [{ id: "x", key: "BRI-X", fields: { summary: "s" } }],
+        nextPageToken: "always-more",
+        isLast: false,
+      }),
+  });
+
+  const out = await new JiraClient(auth, fetchImpl).search("project = BRI", { maxResults: 3 });
+  assert.equal(out.length, 3);
+});
+
+test("a 410 from the removed endpoint surfaces Atlassian's migration message", async () => {
+  const { fetchImpl } = fakeFetch({});
+  const client = new JiraClient(auth, fetchImpl);
+  // Reach past the typed surface to prove the error path itself is intact.
+  await assert.rejects(
+    () => (client as unknown as { request: (m: string, p: string, b?: unknown) => Promise<unknown> })
+      .request("POST", "/search", { jql: "x" }),
+    (e: Error) => e.message.includes("410") && e.message.includes("/rest/api/3/search/jql"),
+  );
+});
+
+// ------------------------------- creates -----------------------------------
+
+test("createIssue sends a real issue type, sanitized labels, and a mapped priority", async () => {
+  const { adapter, calls } = primed({
+    "POST /issue": { id: "100", key: "BRI-100" },
+    "GET /issue/BRI-100": {
+      id: "100",
+      key: "BRI-100",
+      fields: { summary: "t", status: { id: "3", name: "Backlog" }, labels: [] },
+    },
+    "GET /issue/BRI-100/transitions": {
+      transitions: [{ id: "31", name: "To Backlog", to: { id: "3", name: "Backlog" } }],
+    },
+  });
+  (adapter as unknown as { issueTypeIds: Map<string, string> }).issueTypeIds = new Map([
+    ["bug", "10004"],
+  ]);
+  (adapter as unknown as { priorityIds: Map<string, string> }).priorityIds = new Map([
+    ["highest", "1"],
+  ]);
+
+  const proposal: Proposal = {
+    type: "bug",
+    title: "Crash on save",
+    body: "Steps:\n\n1. do it",
+    severity: "critical",
+    isMaterial: false,
+  };
+  await adapter.createIssue(proposal, { author: "qa", label: "agent qa" });
+
+  const create = calls.find((c) => c.method === "POST" && c.path === "/issue");
+  const fields = (create?.body as { fields: Record<string, unknown> }).fields;
+  assert.deepEqual(fields.issuetype, { id: "10004" });
+  assert.deepEqual(fields.priority, { id: "1" });
+  // Jira rejects labels containing whitespace.
+  assert.deepEqual(fields.labels, ["type:bug", "agent-authored", "agent:qa", "agent-qa"]);
+});
+
+test("createIssue omits priority entirely when the instance has it disabled", async () => {
+  const noPriority = {
+    ...cfg,
+    tracker: { ...cfg.tracker, jira: { ...cfg.tracker.jira, usePriority: false } },
+  } as unknown as CrewConfig;
+  const { fetchImpl, calls } = fakeFetch({
+    "POST /issue": { id: "1", key: "BRI-1" },
+    "GET /issue/BRI-1": { id: "1", key: "BRI-1", fields: { summary: "t", labels: [] } },
+    "GET /issue/BRI-1/transitions": {
+      transitions: [{ id: "31", name: "x", to: { id: "3", name: "Backlog" } }],
+    },
+  });
+  const adapter = new JiraAdapter(auth, noPriority, fetchImpl);
+  (adapter as unknown as { meta: unknown }).meta = {
+    teamId: "BRI",
+    myUserId: "u",
+    labelIds: {},
+    stateIds: {},
+  };
+  (adapter as unknown as { issueTypeIds: Map<string, string> }).issueTypeIds = new Map([
+    ["task", "10001"],
+  ]);
+
+  await adapter.createIssue(
+    { type: "task", title: "t", body: "b", severity: "high", isMaterial: false },
+    { author: "qa" },
+  );
+
+  const fields = (calls.find((c) => c.path === "/issue")?.body as { fields: Record<string, unknown> })
+    .fields;
+  assert.equal("priority" in fields, false);
+});
+
+// ------------------------------ ADF mapping --------------------------------
+
+test("textToAdf splits blank-line-separated blocks into paragraphs", () => {
+  const doc = textToAdf("First para.\n\nSecond para.") as {
+    content: Array<{ type: string }>;
+  };
+  assert.equal(doc.content.length, 2);
+  assert.equal(doc.content[0].type, "paragraph");
+});
+
+test("single newlines inside a block become hardBreaks, never literal \\n text", () => {
+  // ADF text nodes may not contain newlines; Jira rejects the document if they do.
+  const doc = textToAdf("line one\nline two") as {
+    content: Array<{ content: Array<{ type: string; text?: string }> }>;
+  };
+  const nodes = doc.content[0].content;
+  assert.deepEqual(
+    nodes.map((n) => n.type),
+    ["text", "hardBreak", "text"],
+  );
+  assert.equal(nodes.every((n) => !n.text?.includes("\n")), true);
+});
+
+test("adfToText recovers the paragraph structure it was built from", () => {
+  const original = "Title line\n\nA second paragraph.";
+  assert.equal(adfToText(textToAdf(original)), original);
+});
+
+test("adfToText passes a plain string through, for older/plain descriptions", () => {
+  assert.equal(adfToText("just text"), "just text");
+});
+
+test("adfToText on an empty or missing description yields an empty string", () => {
+  assert.equal(adfToText(undefined), "");
+  assert.equal(adfToText(textToAdf("")), "");
+});
+
+// ------------------------------- labels ------------------------------------
+
+test("jiraLabel collapses whitespace so Jira accepts the label", () => {
+  assert.equal(jiraLabel("agent product"), "agent-product");
+  assert.equal(jiraLabel("  spaced  out  "), "spaced-out");
+  assert.equal(jiraLabel("type:bug"), "type:bug");
+});
