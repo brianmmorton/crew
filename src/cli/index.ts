@@ -12,6 +12,7 @@ import { runSetup } from "../setup/onboard.js";
 import { ensureGitignored } from "../util/gitignore.js";
 import { checkLabelGate, runDoctor } from "../util/doctor.js";
 import { logger, logToFile, logFilePath } from "../util/logger.js";
+import { setColorEnabled } from "../util/color.js";
 import { Cron } from "croner";
 import { writeFileSync } from "node:fs";
 import {
@@ -97,12 +98,18 @@ program
     "-C, --repo <path>",
     "run against the repo at <path> instead of the current directory (also: CREW_REPO)",
   )
+  .option("--no-color", "disable colored log output (also: NO_COLOR)")
   .hook("preAction", (thisCommand) => {
     // Commander parses global options into the root command, so translating the
     // flag into CREW_REPO here means every subcommand's bare `loadConfig()`
     // picks it up without threading an argument through each action.
-    const repo = thisCommand.opts().repo as string | undefined;
+    const opts = thisCommand.opts();
+    const repo = opts.repo as string | undefined;
     if (repo) process.env.CREW_REPO = repo;
+    // `--no-color` gives commander `color: false`; only ever force colors OFF
+    // here, so the auto-detected default (TTY, NO_COLOR, FORCE_COLOR) still
+    // decides when the flag is absent.
+    if (opts.color === false) setColorEnabled(false);
   });
 
 /** Recursively copy template tree into dest, never overwriting existing files. */

@@ -1,6 +1,6 @@
 import type { CrewConfig, EmptySelectionReason, Logger } from "../types.js";
 import type { Ports } from "./ports.js";
-import { implementerCycle } from "./cycles.js";
+import { implementerCycle, type CycleOutcome } from "./cycles.js";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -45,6 +45,38 @@ let lastIdleLog = 0;
 let onIdle: ((idleMs: number, backlog: number) => void) | null = null;
 export function setIdleHandler(h: ((idleMs: number, backlog: number) => void) | null): void {
   onIdle = h;
+}
+
+/**
+ * Say what a finished cycle actually did. Every non-idle status gets a line at
+ * the severity it deserves, so scanning the log for "what happened to that
+ * ticket" never comes up empty — and a failed cycle never reads as a success.
+ */
+function logCycleOutcome(outcome: CycleOutcome, logger: Logger): void {
+  const detail = outcome.detail ? ` — ${outcome.detail}` : "";
+  switch (outcome.status) {
+    case "pr-opened":
+      logger.info(`cycle finished: PR opened${outcome.url ? ` → ${outcome.url}` : ""}`);
+      return;
+    case "no-commit":
+      logger.warn(
+        `cycle finished: the agent made no commit; the item was returned to the backlog${detail}`,
+      );
+      return;
+    case "rejected":
+      logger.warn(`cycle finished: rejected by the no-touch gate${detail}`);
+      return;
+    case "verify-failed":
+      logger.warn(
+        `cycle finished: the verify gate failed; the item was returned to the backlog${detail}`,
+      );
+      return;
+    case "error":
+      logger.error(`cycle finished: error${detail}`);
+      return;
+    default:
+      logger.info(`cycle finished: ${outcome.status}${detail}`);
+  }
 }
 
 /** Compute back-off ms from a parsed reset time, else the configured default. */
@@ -155,8 +187,12 @@ export async function runExecutorLoop(
         onIdle?.(now - idleSince, backlog);
         await sleepInterruptible(cfg.budget.pollSeconds * 1000);
       } else {
-        // Real work happened, so the next dry spell is a fresh one.
+        // Real work happened, so the next dry spell is a fresh one. "Work
+        // happened" is not the same as "work succeeded" — a rejected or
+        // verify-failed cycle lands here too, so state the outcome plainly
+        // rather than letting a failure look like a quiet success.
         idleSince = null;
+        logCycleOutcome(outcome, logger);
         await sleep(2000); // did work; brief pause before the next claim
       }
     } catch (e) {

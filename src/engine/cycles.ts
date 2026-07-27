@@ -20,6 +20,7 @@ import {
 import { extractProposalsJson } from "../personas/parse.js";
 import { withHeartbeat } from "../util/heartbeat.js";
 import { writeRunLog } from "../util/runlog.js";
+import { style } from "../util/color.js";
 import { agentsOfKind, executorFor } from "../agent/agents.js";
 import { MAX_RESUME_ATTEMPTS, resumeAttempts, setResumeAttempts } from "../util/state.js";
 import type { Complexity, CrewConfig as _Cfg } from "../types.js";
@@ -141,7 +142,16 @@ export async function implementerCycle(
    * of throwing the work away and paying an agent to redo it.
    */
   let preserve: string | null = null;
-  const demote = async (note: string) => {
+  /**
+   * Send an item back to the backlog with an explanation. The same explanation
+   * goes to the log as a warning: a demote is always a failure, and reading the
+   * tracker comment should never be the only way to find out why.
+   */
+  const demote = async (reason: string, note: string) => {
+    logger.warn(`${exec.name} ${item.identifier}: ${reason} — returning to "${S.backlog}"`);
+    for (const line of note.split("\n")) {
+      logger.warn(`  ${item.identifier} ${style("│", "dim")} ${line}`);
+    }
     await ports.tracker.addComment(item.id, `crew: ${note}`);
     await ports.tracker.transition(item.id, S.backlog);
   };
@@ -163,6 +173,7 @@ export async function implementerCycle(
         setResumeAttempts(cfg.configDir, item.identifier, 0);
         await ports.git.removeWorktree(existing).catch(() => {});
         await demote(
+          `exhausted ${MAX_RESUME_ATTEMPTS} attempts to land the existing commit`,
           `could not push/open a PR after ${MAX_RESUME_ATTEMPTS} attempts. The work was ` +
             `discarded — please check ${authHint(cfg)} and the branch \`${branch}\`.`,
         );
@@ -212,22 +223,46 @@ export async function implementerCycle(
     }
 
     if (!(await ports.git.hasCommits(wt))) {
-      await demote(`no commit produced. ${res.summary ?? ""}`.trim());
+      await demote("the agent produced no commit", `no commit produced. ${res.summary ?? ""}`.trim());
       return { status: "no-commit" };
     }
+    logger.info(`${exec.name} ${item.identifier}: commit present — running gates`);
 
     const violations = await ports.git.noTouchViolations(wt, cfg.gates.noTouch);
     if (violations.length) {
-      await demote(`rejected — touched protected paths:\n${violations.join("\n")}`);
+      await demote(
+        `no-touch gate failed (${violations.length} protected path(s))`,
+        `rejected — touched protected paths:\n${violations.join("\n")}`,
+      );
       return { status: "rejected", detail: violations.join(", ") };
     }
+    logger.info(`${exec.name} ${item.identifier}: no-touch gate passed`);
 
     const apps = await ports.git.changedApps(wt, Object.keys(cfg.gates.verify));
+    logger.info(
+      `${exec.name} ${item.identifier}: verify gate starting ` +
+        `(changed apps: ${apps.length ? apps.join(", ") : "none detected — running all"})`,
+    );
     const verify = await runVerify(cfg, wt, apps);
+    // Verify output is the single most useful artifact when a cycle dies, so it
+    // is always persisted — pass or fail — and its path is always logged.
+    const verifyLog = writeRunLog(
+      cfg.configDir,
+      `verify-${item.identifier}${verify.ok ? "" : "-FAILED"}`,
+      verify.output,
+    );
     if (!verify.ok) {
-      await demote(`verification failed.\n\n\`\`\`\n${tail(verify.output)}\n\`\`\``);
-      return { status: "verify-failed" };
+      await demote(
+        "verify gate failed",
+        `verification failed.\n\n\`\`\`\n${tail(verify.output)}\n\`\`\``,
+      );
+      if (verifyLog) logger.warn(`${item.identifier}: full verify output → ${verifyLog}`);
+      return { status: "verify-failed", detail: tail(verify.output, 400) };
     }
+    logger.info(
+      `${exec.name} ${item.identifier}: verify gate passed` +
+        (verifyLog ? ` (output → ${verifyLog})` : ""),
+    );
 
     // From here the commit is verified, so any failure preserves the worktree.
     preserve = wt;
@@ -248,7 +283,12 @@ export async function implementerCycle(
     return { status: "error", detail: String(e) };
   } finally {
     if (wt && wt !== preserve) {
-      await ports.git.removeWorktree(wt).catch(() => {});
+      logger.info(`${item.identifier}: removing worktree ${wt} (branch ${branch})`);
+      await ports.git
+        .removeWorktree(wt)
+        .catch((e) =>
+          logger.warn(`${item.identifier}: worktree cleanup failed`, { path: wt, error: String(e) }),
+        );
     } else if (preserve) {
       logger.warn(
         `${item.identifier}: kept the worktree at ${preserve} (branch ${branch}) — ` +
@@ -276,7 +316,9 @@ async function landCommit(
 ): Promise<CycleOutcome> {
   const S = cfg.tracker.statuses;
 
+  logger.info(`${exec.name} ${item.identifier}: pushing ${branch}…`);
   await ports.git.push(wt, branch);
+  logger.info(`${exec.name} ${item.identifier}: pushed; opening PR against ${cfg.repo.baseBranch}…`);
   const url = await ports.git.openPr({
     repoPath: cfg.repo.path,
     branch,
@@ -293,13 +335,17 @@ async function landCommit(
   logger.info(`${exec.name} opened PR for ${item.identifier}`, { url });
 
   // Reviewers run against the pushed branch, before the worktree is removed.
+  logger.info(`${item.identifier}: review stage starting`);
   await runReviewers(cfg, ports, wt, item, url, logger).catch((e) =>
-    logger.warn("review stage failed (non-fatal)", { error: String(e) }),
+    logger.warn(`${item.identifier}: review stage failed (non-fatal)`, { error: String(e) }),
   );
+  logger.info(`${item.identifier}: review stage done`);
 
+  logger.info(`${item.identifier}: self-review (reflection) starting`);
   await reflect(cfg, ports, wt, exec, logger).catch((e) =>
-    logger.warn("reflection failed (non-fatal)", { error: String(e) }),
+    logger.warn(`${item.identifier}: reflection failed (non-fatal)`, { error: String(e) }),
   );
+  logger.info(`${item.identifier}: self-review done`);
 
   return { status: "pr-opened", url };
 }
@@ -410,13 +456,22 @@ async function runReviewers(
           onActivity: (line) => logger.info(`  ${rev.name} ${line}`),
         }),
       );
-      writeRunLog(cfg.configDir, `${rev.name}-${item.identifier}`, res.raw ?? "");
+      const revLog = writeRunLog(cfg.configDir, `${rev.name}-${item.identifier}`, res.raw ?? "");
+      if (revLog) logger.info(`${rev.name} ${item.identifier}: full run output → ${revLog}`);
       if (res.usageLimited) {
         logger.warn(`${rev.name}: usage limited; skipping review`);
         continue;
       }
 
       const parsed = res.review ?? extractReview(res.raw ?? "");
+      // No parse means the reviewer's verdict was silently dropped. That is a
+      // real failure of the stage, not a no-op, so it is never swallowed.
+      if (!parsed) {
+        logger.warn(
+          `${rev.name}: returned no parseable review verdict for ${item.identifier}; ` +
+            `no transition or comment was applied` + (revLog ? ` (raw output → ${revLog})` : ""),
+        );
+      }
       if (parsed) await applyReview(cfg, ports, rev, item, prUrl, parsed, logger);
 
       // A reviewer may also file follow-up work. This mirrors proposerCycle:

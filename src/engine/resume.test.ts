@@ -68,6 +68,9 @@ function harness(sim: Sim = {}) {
     comments: [],
   };
   const configDir = mkdtempSync(join(tmpdir(), "crew-resume-"));
+  // Verify commands really run, so the fresh worktree must be a real directory
+  // when a test exercises the gate. Other tests never chdir into it.
+  const freshWt = sim.verifyOk === false ? mkdtempSync(join(tmpdir(), "crew-wt-")) : "/wt/fresh";
 
   const cfg = {
     configDir,
@@ -84,7 +87,13 @@ function harness(sim: Sim = {}) {
       },
       autoPromote: true,
     },
-    gates: { noTouch: [], verify: {}, wipCap: 3 },
+    // `verifyOk: false` needs a real command so runVerify has a gate to fail;
+    // `exit 1` is the cheapest portable one.
+    gates: {
+      noTouch: [],
+      verify: sim.verifyOk === false ? { app: "exit 1" } : {},
+      wipCap: 3,
+    },
     models: { byComplexity: {}, default: undefined },
     triager: { backlogCap: 30 },
     personas: {},
@@ -115,7 +124,7 @@ function harness(sim: Sim = {}) {
       findWorktree: async () => sim.existingWorktree ?? null,
       createWorktree: async () => {
         rec.created++;
-        return "/wt/fresh";
+        return freshWt;
       },
       hasCommits: async () => sim.hasCommits ?? true,
       noTouchViolations: async () => [],
@@ -141,7 +150,20 @@ function harness(sim: Sim = {}) {
     },
   } as unknown as Ports;
 
-  return { cfg, ports, rec, configDir };
+  return { cfg, ports, rec, configDir, freshWt };
+}
+
+/** Collects every level into one list, so a test can assert on what was logged. */
+function recordingLogger(): { logger: Logger; lines: string[] } {
+  const lines: string[] = [];
+  return {
+    lines,
+    logger: {
+      info: (m) => lines.push(`INFO ${m}`),
+      warn: (m) => lines.push(`WARN ${m}`),
+      error: (m) => lines.push(`ERROR ${m}`),
+    },
+  };
 }
 
 // --------------------------- preserving on failure -------------------------
@@ -172,6 +194,67 @@ test("a run that produced no commit removes the worktree", async () => {
   const out = await implementerCycle(cfg, ports, silent);
   assert.equal(out.status, "no-commit");
   assert.deepEqual(rec.removed, ["/wt/fresh"], "nothing to preserve");
+});
+
+// --------------------------- verbose failure logging ------------------------
+
+/**
+ * The bug these cover: a failed verify demoted the item, deleted the worktree,
+ * and returned — writing nothing to the log. The only trace was a tracker
+ * comment, so the run read as a success. Every lifecycle step must now say what
+ * it did and why.
+ */
+
+test("a failed verify logs the failure, the reason, and the demotion", async () => {
+  const { cfg, ports, rec } = harness({ verifyOk: false });
+  const { logger, lines } = recordingLogger();
+  const out = await implementerCycle(cfg, ports, logger);
+
+  assert.equal(out.status, "verify-failed");
+  assert.ok(rec.transitions.includes("Backlog"), "item went back to the backlog");
+
+  const warns = lines.filter((l) => l.startsWith("WARN"));
+  assert.ok(warns.some((l) => /verify gate failed/.test(l)), "names the failing gate");
+  assert.ok(warns.some((l) => /returning to "Backlog"/.test(l)), "logs the demotion");
+  assert.ok(
+    warns.some((l) => /verification failed/.test(l)),
+    "includes the reason posted to the tracker",
+  );
+});
+
+test("a failed verify reports its output in the cycle detail", async () => {
+  const { cfg, ports } = harness({ verifyOk: false });
+  const out = await implementerCycle(cfg, ports, silent);
+  assert.equal(out.status, "verify-failed");
+  assert.match(out.detail ?? "", /exit 1/, "detail carries the command that failed");
+});
+
+test("gates that pass are logged too, so the lifecycle is traceable", async () => {
+  const { cfg, ports } = harness();
+  const { logger, lines } = recordingLogger();
+  await implementerCycle(cfg, ports, logger);
+
+  for (const step of [/commit present/, /no-touch gate passed/, /verify gate passed/, /pushing/]) {
+    assert.ok(lines.some((l) => step.test(l)), `missing a log line matching ${step}`);
+  }
+});
+
+test("worktree removal is announced rather than happening silently", async () => {
+  const { cfg, ports, freshWt } = harness({ verifyOk: false });
+  const { logger, lines } = recordingLogger();
+  await implementerCycle(cfg, ports, logger);
+  assert.ok(
+    lines.some((l) => l.includes("removing worktree") && l.includes(freshWt)),
+    "the deleted worktree path is named in the log",
+  );
+});
+
+test("a no-commit run logs why the item was demoted", async () => {
+  const { cfg, ports } = harness({ hasCommits: false });
+  const { logger, lines } = recordingLogger();
+  const out = await implementerCycle(cfg, ports, logger);
+  assert.equal(out.status, "no-commit");
+  assert.ok(lines.some((l) => /WARN.*produced no commit/.test(l)));
 });
 
 // --------------------------- resuming --------------------------------------
