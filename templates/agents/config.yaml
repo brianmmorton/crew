@@ -9,6 +9,9 @@ repo:
 
 linear:
   team: "YOUR LINEAR TEAM"     # exact team name as it appears in Linear
+  # project: "My Repo"         # optional: scope this repo to one Linear project
+                               # (name or id). Lets many repos share one team on
+                               # the free plan and stay independent.
   labels:
     prd: "type:prd"
     bug: "type:bug"
@@ -31,11 +34,37 @@ budget:
 
 gates:
   wipCap: 3
+  # Optional: prepare the env before verify (activate a runtime, install deps).
+  # Runs in the same shell as the verify commands. Leave empty if not needed.
+  # e.g. node:  "bash -lc 'nvm use >/dev/null' && pnpm install"
+  #      python:"source .venv/bin/activate && pip install -r requirements.txt"
+  setup: ""
   verify: {}                   # app -> command, e.g. { web: "npm test" }. `crew setup` fills this in.
   noTouch:                     # globs the Implementer must never modify
     - ".env*"
     - "**/migrations/**"
     - ".github/**"
+
+# --- Models -----------------------------------------------------------------
+# Each work item has a complexity (the complexity:low/medium/high label agents
+# set, or you set by hand). The implementer runs on the model mapped here, so
+# simple work uses a cheap model and hard work uses your strongest.
+#
+# Prefer SHORT ALIASES — they auto-track the latest version, so there are no
+# model IDs to maintain:
+#   haiku    – fastest & cheapest; small, low-risk changes
+#   sonnet   – balanced; a solid everyday-coding default
+#   opus     – strongest reasoning; complex / multi-file / risky changes
+#   best     – highest-capability model available on your plan
+#   opusplan – Opus while planning, Sonnet while editing (quality/cost mix)
+# Empty "" = Claude Code's default model. To pin an exact version use a full id
+# (e.g. claude-opus-5). To see what your plan offers: run `claude`, then `/model`.
+models:
+  default: ""
+  byComplexity:
+    low: "haiku"      # fast / cheap
+    medium: "sonnet"  # balanced
+    high: "opus"      # strongest
 
 personas:
   implementer: { cadence: "continuous" }

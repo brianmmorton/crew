@@ -9,6 +9,7 @@ import { implementerCycle, proposerCycle } from "../engine/cycles.js";
 import { runSupervised } from "../engine/supervisor.js";
 import { runSetup } from "../setup/onboard.js";
 import { ensureGitignored } from "../util/gitignore.js";
+import { runDoctor } from "../util/doctor.js";
 import { logger, logToFile, logFilePath } from "../util/logger.js";
 import { Cron } from "croner";
 import type { CrewConfig, PersonaName } from "../types.js";
@@ -103,6 +104,18 @@ program
     }
     const cfg = loadConfig();
     await runSetup(cfg);
+    console.log("\nChecking prerequisites:");
+    await runDoctor(cfg, logger);
+  });
+
+program
+  .command("doctor")
+  .description("Check that required tools (git, gh, claude) and secrets are present")
+  .action(async () => {
+    const cfg = loadConfig();
+    console.log("Prerequisites:");
+    const ok = await runDoctor(cfg, logger);
+    process.exit(ok ? 0 : 1);
   });
 
 program
@@ -118,7 +131,7 @@ program
     const enabled = Object.keys(ports.prompts) as PersonaName[];
     console.log(`project:      ${cfg.project}`);
     console.log(`repo:         ${cfg.repo.path} (base ${cfg.repo.baseBranch})`);
-    console.log(`linear team:  ${cfg.linear.team}`);
+    console.log(`linear team:  ${cfg.linear.team}${cfg.linear.project ? ` / project: ${cfg.linear.project}` : ""}`);
     console.log(`backlog:      ${backlog}   (cap ${cfg.triager.backlogCap})`);
     console.log(`in progress:  ${inProgress} (WIP cap ${cfg.gates.wipCap})`);
     console.log(`personas:     ${enabled.join(", ") || "(none found)"}`);
@@ -155,6 +168,7 @@ program
     const logPath = logFilePath(cfg.configDir);
     logToFile(logPath);
     console.error(`crew: logging to ${logPath}  (tail -f to follow)`);
+    await runDoctor(cfg, logger, true); // quiet: warn on missing prereqs, continue
     const ports = await buildPorts(cfg);
     await runSupervised(cfg, ports, logger, {
       proposers: opts.proposers,

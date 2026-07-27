@@ -35,6 +35,8 @@ export function requestStop(): void {
   wake?.();
 }
 
+let lastIdleLog = 0;
+
 /** Compute back-off ms from a parsed reset time, else the configured default. */
 export function backoffMs(resetAt: string | null | undefined, defaultMinutes: number): number {
   if (resetAt) {
@@ -84,6 +86,22 @@ export async function runExecutorLoop(
         });
         await sleep(ms); // not interruptible: waking would just re-hit the limit
       } else if (outcome.status === "idle") {
+        // Explain the idle, throttled to ~5 min, so it's never a silent mystery.
+        const now = Date.now();
+        if (now - lastIdleLog > 5 * 60 * 1000) {
+          lastIdleLog = now;
+          let backlog = 0;
+          try {
+            backlog = await ports.linear.countBacklog();
+          } catch {
+            /* ignore */
+          }
+          logger.info(
+            `executor idle: no ready work in "${cfg.linear.statuses.ready}" ` +
+              `(labeled type:task/bug/chore-dx). ${backlog} in "${cfg.linear.statuses.backlog}". ` +
+              `Move an item to "${cfg.linear.statuses.ready}" + add a type label, then press i.`,
+          );
+        }
         await sleepInterruptible(cfg.budget.pollSeconds * 1000);
       } else {
         await sleep(2000); // did work; brief pause before the next claim

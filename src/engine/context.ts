@@ -70,6 +70,7 @@ End your response with a single fenced JSON block and nothing after it:
       "title": "short imperative title",
       "body": "markdown: the problem, evidence, and suggested approach (for a PRD, the full spec)",
       "severity": "low | medium | high | critical",
+      "complexity": "low | medium | high",
       "evidence": "file paths, test names, or screenshots that show the issue",
       "isMaterial": false
     }
@@ -77,8 +78,11 @@ End your response with a single fenced JSON block and nothing after it:
 }
 \`\`\`
 
-Propose only things you are confident are real and valuable. Zero proposals is a
-fine answer. Do not repeat work that clearly already exists.
+Set "severity" by how much it matters (drives pickup priority) and "complexity"
+by how hard the change is (low = a few lines / one file; high = multi-file,
+tricky, or risky — drives which model implements it). Propose only things you are
+confident are real and valuable. Zero proposals is a fine answer. Do not repeat
+work that clearly already exists.
 `;
 }
 

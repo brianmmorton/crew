@@ -10,6 +10,14 @@ import {
 } from "./context.js";
 import { extractProposalsJson } from "../personas/parse.js";
 import { withHeartbeat } from "../util/heartbeat.js";
+import { writeRunLog } from "../util/runlog.js";
+import type { Complexity, CrewConfig as _Cfg } from "../types.js";
+
+/** Pick the implementer model for an item's complexity, falling back sensibly. */
+function modelForComplexity(cfg: _Cfg, complexity: Complexity | null | undefined): string | undefined {
+  const byC = complexity ? cfg.models.byComplexity[complexity] : undefined;
+  return byC || cfg.models.default || cfg.personas.implementer?.model || undefined;
+}
 
 export type CycleStatus =
   | "idle"
@@ -66,16 +74,22 @@ export async function implementerCycle(
       ports.constitution,
       item,
     );
-    logger.info(`implementer ${item.identifier}: working (headless Claude; runs tests before committing)…`);
+    const model = modelForComplexity(cfg, item.complexity);
+    logger.info(
+      `implementer ${item.identifier}: working (complexity=${item.complexity ?? "?"}, model=${model ?? "default"})…`,
+    );
     const worktree = wt;
     const res = await withHeartbeat(logger, `implementer ${item.identifier}`, () =>
       ports.persona.run("implementer", {
         cwd: worktree,
         prompt,
-        model: cfg.personas.implementer?.model,
+        model,
         expectJson: false,
+        onActivity: (line) => logger.info(`  ${item.identifier} ${line}`),
       }),
     );
+    const runLog = writeRunLog(cfg.configDir, `implementer-${item.identifier}`, res.raw ?? res.summary ?? "");
+    if (runLog) logger.info(`implementer ${item.identifier}: full run output → ${runLog}`);
 
     if (res.usageLimited) {
       // Put the issue back so it's picked up again after the window reopens.
@@ -192,8 +206,11 @@ export async function proposerCycle(
       prompt,
       model: cfg.personas[name]?.model,
       expectJson: true,
+      onActivity: (line) => logger.info(`  ${name} ${line}`),
     }),
   );
+  const runLog = writeRunLog(cfg.configDir, name, res.raw ?? "");
+  if (runLog) logger.info(`${name}: full run output → ${runLog}`);
   if (res.usageLimited) return { status: "usage-limited", resetAt: res.resetAt ?? null };
 
   const created: string[] = [];
@@ -208,11 +225,14 @@ export async function proposerCycle(
       author: name,
       needsApproval: material,
     });
-    if (material) await ports.linear.assign(item.id, ports.meta.myUserId);
+    if (material) {
+      await ports.linear.assign(item.id, ports.meta.myUserId);
+    } else if (cfg.linear.autoPromote) {
+      await ports.linear.transition(item.id, cfg.linear.statuses.ready);
+    }
     created.push(item.identifier);
-    logger.info(`${name} filed ${item.identifier}${material ? " (PRD, needs approval)" : ""}`, {
-      title: p.title,
-    });
+    const where = material ? " (PRD, needs approval)" : cfg.linear.autoPromote ? " → Todo" : " → Backlog";
+    logger.info(`${name} filed ${item.identifier}${where}`, { title: p.title });
     if ((await ports.linear.countBacklog()) >= cfg.triager.backlogCap) break;
   }
 

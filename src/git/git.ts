@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { rmSync } from "node:fs";
 import { promisify } from "node:util";
 import type { GitPort, OpenPrOptions } from "../types.js";
 import { matchesAny } from "../util/glob.js";
@@ -52,6 +53,22 @@ export class GitAdapter implements GitPort {
 
   async createWorktree(branch: string): Promise<string> {
     const wt = this.worktreePath(branch);
+
+    // Idempotent cleanup: a killed/interrupted run can leave the worktree and
+    // branch behind, which would make `worktree add -b` fail with "already
+    // exists". Clear any leftovers for this branch before recreating.
+    await this.git(["-C", this.repoPath, "worktree", "prune"]).catch(() => {});
+    await this.git(["-C", this.repoPath, "worktree", "remove", "--force", wt]).catch(() => {});
+    try {
+      rmSync(wt, { recursive: true, force: true }); // orphaned dir not tracked by git
+    } catch {
+      /* ignore */
+    }
+    // Delete a leftover local branch from a prior failed attempt. Safe: a
+    // successful run's branch is on In Review (not re-selected), so anything
+    // still named agent/<id> here belongs to an attempt that never opened a PR.
+    await this.git(["-C", this.repoPath, "branch", "-D", branch]).catch(() => {});
+
     await this.git([
       "-C",
       this.repoPath,

@@ -24,6 +24,8 @@ export type PersonaName =
 
 export type Severity = "low" | "medium" | "high" | "critical";
 
+export type Complexity = "low" | "medium" | "high";
+
 /** A normalized Linear issue as the engine sees it. */
 export interface WorkItem {
   id: string;
@@ -48,6 +50,8 @@ export interface WorkItem {
   url: string;
   assigneeId: string | null;
   labels: string[];
+  /** From a `complexity:*` label; drives which model implements it. */
+  complexity?: Complexity | null;
 }
 
 /** A unit of work an agent proposes; the engine dedups then creates it. */
@@ -57,6 +61,8 @@ export interface Proposal {
   /** Markdown body (for PRDs, the full PRD). */
   body: string;
   severity?: Severity;
+  /** Rough implementation complexity; selects the model that implements it. */
+  complexity?: Complexity;
   /** Where the agent saw the problem (file paths, screenshots, test names). */
   evidence?: string;
   /**
@@ -92,6 +98,8 @@ export interface CrewConfig {
   repo: { path: string; baseBranch: string };
   linear: {
     team: string;
+    /** Optional Linear project (name or id) to scope this repo's issues to. */
+    project?: string;
     labels: Record<"prd" | "bug" | "task" | "chore", string>;
     statuses: {
       backlog: string;
@@ -103,6 +111,8 @@ export interface CrewConfig {
     };
     /** State names considered "approved" for a parent PRD. */
     approvedStates: string[];
+    /** Non-material proposals go straight to the ready state (default true). */
+    autoPromote: boolean;
   };
   budget: {
     target: "max-monthly" | "fixed";
@@ -114,12 +124,19 @@ export interface CrewConfig {
   };
   gates: {
     wipCap: number;
+    /** Optional env-prep command run before verify, in the same shell. */
+    setup?: string;
     /** app name -> verify command run from repo root. */
     verify: Record<string, string>;
     /** globs the Implementer must never modify. */
     noTouch: string[];
   };
   personas: Partial<Record<PersonaName, { cadence: string; model?: string }>>;
+  /** Model selection. byComplexity overrides the default for that complexity. */
+  models: {
+    default?: string;
+    byComplexity: { low?: string; medium?: string; high?: string };
+  };
   triager: { cadence: string; dedupThreshold: number; backlogCap: number };
 
   // Resolved at load time (not in the yaml):
@@ -139,6 +156,8 @@ export interface LinearMeta {
   labelIds: Record<string, string>;
   /** state name -> id */
   stateIds: Record<string, string>;
+  /** Resolved project id, if the repo is scoped to a Linear project. */
+  projectId?: string;
 }
 
 export interface LinearPort {
@@ -216,6 +235,8 @@ export interface RunPersonaOptions {
   model?: string;
   /** If true, we expect structured JSON (proposers); else a commit outcome. */
   expectJson: boolean;
+  /** Called with a compact line for each streamed agent step (tool use, text). */
+  onActivity?: (line: string) => void;
 }
 
 export interface PersonaPort {

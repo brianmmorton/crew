@@ -27,12 +27,15 @@ async function runShell(
 }
 
 /**
- * Run the configured verify commands inside `worktreePath`.
+ * Run the configured verify commands inside `worktreePath`. Language-agnostic:
+ * crew assumes no toolchain. An optional `gates.setup` command (whatever the
+ * project needs to prepare its env — activate a version manager, install deps)
+ * runs first in the SAME shell so its environment applies to the checks.
  *
- * If `apps` is non-empty, only the verify commands for those app names run;
- * if empty, every command in `cfg.gates.verify` runs. A best-effort
- * `pnpm install` runs first (failures ignored). Never throws on verify
- * failure — a non-zero command sets `ok:false` and its output is accumulated.
+ * If `apps` is non-empty, only those apps' verify commands run; if empty, every
+ * command in `cfg.gates.verify` runs. No verify commands configured => no gate
+ * (ok:true), and the agent's own verification + PR review are the safety net.
+ * Never throws — a non-zero exit sets `ok:false`.
  */
 export async function runVerify(
   cfg: CrewConfig,
@@ -40,25 +43,16 @@ export async function runVerify(
   apps: string[],
 ): Promise<{ ok: boolean; output: string }> {
   const verify = cfg.gates.verify ?? {};
-  const targets =
-    apps.length > 0
-      ? apps.filter((a) => a in verify)
-      : Object.keys(verify);
+  const setup = cfg.gates.setup?.trim();
+  const targets = apps.length > 0 ? apps.filter((a) => a in verify) : Object.keys(verify);
+  const cmds = targets.map((a) => verify[a]).filter((c): c is string => !!c);
 
-  let output = "";
-
-  // Best-effort dependency install; ignore failure.
-  const install = await runShell("pnpm install", worktreePath);
-  output += `$ pnpm install\n${install.output}\n`;
-
-  let ok = true;
-  for (const app of targets) {
-    const cmd = verify[app];
-    if (!cmd) continue;
-    const res = await runShell(cmd, worktreePath);
-    output += `\n$ [${app}] ${cmd}\n${res.output}\n`;
-    if (!res.ok) ok = false;
+  if (cmds.length === 0) {
+    return { ok: true, output: "(no verify commands configured — gate skipped)" };
   }
 
-  return { ok, output };
+  // Run setup + all verify commands in one shell so setup's env carries through.
+  const full = [setup, ...cmds].filter((s) => s && s.length > 0).join(" && ");
+  const res = await runShell(full, worktreePath);
+  return { ok: res.ok, output: `$ ${full}\n${res.output}` };
 }

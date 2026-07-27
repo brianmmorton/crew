@@ -9,6 +9,7 @@ test("keyToAction maps persona + control keys", () => {
   assert.equal(keyToAction("i", false), "impl");
   assert.equal(keyToAction("p", false), "pause");
   assert.equal(keyToAction("s", false), "status");
+  assert.equal(keyToAction("k", false), "kill");
   assert.equal(keyToAction("c", true), "quit");
   assert.equal(keyToAction("x", false), null);
   assert.equal(keyToAction(undefined, false), null);

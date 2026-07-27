@@ -4,6 +4,7 @@ import type { CrewConfig, Logger, PersonaName } from "../types.js";
 import type { Ports } from "./ports.js";
 import { proposerCycle } from "./cycles.js";
 import { runExecutorLoop, requestStop, wakeExecutor, setPaused } from "./loop.js";
+import { killActiveRuns } from "../personas/runner.js";
 import { readState, writeState } from "../util/state.js";
 
 export interface RunOptions {
@@ -20,6 +21,7 @@ export type HotAction =
   | "impl"
   | "pause"
   | "status"
+  | "kill"
   | "quit"
   | null;
 
@@ -41,6 +43,8 @@ export function keyToAction(name: string | undefined, ctrl: boolean): HotAction 
       return "pause";
     case "s":
       return "status";
+    case "k":
+      return "kill";
     default:
       return null;
   }
@@ -78,7 +82,7 @@ export function dueOnStartup(
 }
 
 const LEGEND =
-  "[q]QA  [d]Design  [a]Architect  [i]impl-now  [p]pause  [s]status  [Ctrl-C]quit";
+  "[q]QA  [d]Design  [a]Architect  [i]impl-now  [k]kill-run  [p]pause  [s]status  [Ctrl-C]quit";
 
 /**
  * Run the whole team in one process: the continuous executor loop plus proposers
@@ -205,6 +209,11 @@ export async function runSupervised(
       case "status":
         void printStatus();
         break;
+      case "kill": {
+        const n = killActiveRuns();
+        logger.warn(`hotkey: killed ${n} running agent${n === 1 ? "" : "s"}`);
+        break;
+      }
       case "quit":
         shutdown("quit");
         break;

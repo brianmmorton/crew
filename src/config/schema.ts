@@ -9,6 +9,9 @@ export const configSchema = z.object({
   }),
   linear: z.object({
     team: z.string().min(1),
+    // Optional: scope this repo to a single Linear project (name or id) so many
+    // repos can share one team on the free plan and stay independent.
+    project: z.string().optional(),
     labels: z
       .object({
         prd: z.string().default("type:prd"),
@@ -30,6 +33,9 @@ export const configSchema = z.object({
     approvedStates: z
       .array(z.string())
       .default(["Todo", "In Progress", "In Review", "Done"]),
+    // Non-material proposals go straight to the ready state (executable). Set
+    // false to stage them in Backlog for manual promotion instead.
+    autoPromote: z.boolean().default(true),
   }),
   budget: z
     .object({
@@ -42,6 +48,9 @@ export const configSchema = z.object({
   gates: z
     .object({
       wipCap: z.number().int().min(1).default(3),
+      // Optional shell command to prepare the env before verify (e.g. activate a
+      // runtime / install deps). Runs in the same shell as the verify commands.
+      setup: z.string().optional(),
       verify: z.record(z.string()).default({}),
       noTouch: z
         .array(z.string())
@@ -50,6 +59,18 @@ export const configSchema = z.object({
     .default({}),
   personas: z
     .record(z.object({ cadence: z.string(), model: z.string().optional() }))
+    .default({}),
+  models: z
+    .object({
+      default: z.string().optional(),
+      byComplexity: z
+        .object({
+          low: z.string().optional(),
+          medium: z.string().optional(),
+          high: z.string().optional(),
+        })
+        .default({}),
+    })
     .default({}),
   triager: z
     .object({

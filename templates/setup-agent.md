@@ -29,11 +29,19 @@ Keep it to a few questions; infer the rest.
   conventions; reference the real conventions doc and the real run/test commands
   you found. Delete personas that don't apply.
 - `config.yaml` — fill in `project`; set `gates.verify` to the REAL commands
-  (app -> command); set `gates.noTouch` to the real sensitive paths; enable/disable
-  personas to match. Leave the Linear `team` and status names for the user unless
-  they tell you them.
+  (app -> command); set `gates.setup` to whatever prepares the env before those
+  checks (activate the pinned runtime / version manager, install deps), or leave
+  it empty if nothing is needed; set `gates.noTouch` to the real sensitive paths;
+  enable/disable personas to match. Leave the Linear `team` and status names for
+  the user unless they tell you them.
 
-## 4. Constraints
+## 4. Verify the project's tools are installed
+Check that the commands your setup/verify steps rely on actually exist on this
+machine (package manager, language runtime, test runner, any CLIs). Run them with
+`--version` or `command -v`. Tell the user exactly what's missing and how to
+install it — don't assume it's there.
+
+## 5. Constraints
 - Do NOT touch secrets or any `.env` file. Do NOT modify application code.
 - When done, print a short summary of what you wrote and exactly what the user
   still needs to do by hand: set the Linear `team` in config.yaml, add the

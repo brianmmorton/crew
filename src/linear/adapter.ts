@@ -1,6 +1,7 @@
 import { LinearClient } from "@linear/sdk";
 import type { Issue, Team } from "@linear/sdk";
 import type {
+  Complexity,
   CrewConfig,
   ItemType,
   LinearMeta,
@@ -15,6 +16,8 @@ import { isExecutable, rankCandidates } from "./selection.js";
 
 /** Labels every agent-authored issue carries. */
 const AGENT_AUTHORED_LABEL = "agent-authored";
+/** Prefix for the complexity label (e.g. "complexity:high"). */
+const COMPLEXITY_PREFIX = "complexity:";
 /** Modest page size for the queries we run. */
 const PAGE = 250;
 const DEDUP_THRESHOLD = 0.85;
@@ -66,11 +69,24 @@ export class LinearAdapter implements LinearPort {
       labelIds[lbl.name] = lbl.id;
     }
 
+    // Optional project scoping: resolve the configured project by name or id.
+    let projectId: string | undefined;
+    if (this.cfg.linear.project) {
+      const want = this.cfg.linear.project;
+      const projConn = await team.projects({ first: PAGE });
+      const proj = projConn.nodes.find((p) => p.name === want || p.id === want);
+      if (!proj) {
+        throw new Error(`Linear project not found in team "${teamName}": "${want}"`);
+      }
+      projectId = proj.id;
+    }
+
     this.meta = {
       teamId: team.id,
       myUserId: viewer.id,
       labelIds,
       stateIds,
+      projectId,
     };
 
     // Ensure the configured type labels exist (create on the fly if missing).
@@ -109,6 +125,12 @@ export class LinearAdapter implements LinearPort {
     }
     meta.labelIds[name] = label.id;
     return label.id;
+  }
+
+  /** Issue-filter fragment scoping to the configured project (empty if none). */
+  private projectFilter(): Record<string, unknown> {
+    const pid = this.meta?.projectId;
+    return pid ? { project: { id: { eq: pid } } } : {};
   }
 
   private stateIdOrThrow(stateName: string): string {
@@ -184,6 +206,14 @@ export class LinearAdapter implements LinearPort {
     const type =
       labelNames.map((n) => this.labelNameToType(n)).find((t) => t !== null) ?? null;
 
+    let complexity: Complexity | null = null;
+    for (const n of labelNames) {
+      if (n.startsWith(COMPLEXITY_PREFIX)) {
+        const v = n.slice(COMPLEXITY_PREFIX.length);
+        if (v === "low" || v === "medium" || v === "high") complexity = v;
+      }
+    }
+
     return {
       id: issue.id,
       identifier: issue.identifier,
@@ -197,6 +227,7 @@ export class LinearAdapter implements LinearPort {
       url: issue.url,
       assigneeId: assignee?.id ?? null,
       labels: labelNames,
+      complexity,
     };
   }
 
@@ -207,7 +238,10 @@ export class LinearAdapter implements LinearPort {
     const team = this.ensureTeam();
 
     const conn = await team.issues({
-      filter: { state: { name: { eq: this.cfg.linear.statuses.ready } } },
+      filter: {
+        state: { name: { eq: this.cfg.linear.statuses.ready } },
+        ...this.projectFilter(),
+      },
       first: PAGE,
     });
 
@@ -221,7 +255,7 @@ export class LinearAdapter implements LinearPort {
     this.ensureMeta();
     const team = this.ensureTeam();
     const conn = await team.issues({
-      filter: { state: { name: { eq: stateName } } },
+      filter: { state: { name: { eq: stateName } }, ...this.projectFilter() },
       first: PAGE,
     });
     return conn.nodes.length;
@@ -256,6 +290,10 @@ export class LinearAdapter implements LinearPort {
     const typeLabelId = await this.ensureLabelId(this.typeToLabelName(proposal.type));
     const authoredId = await this.ensureLabelId(AGENT_AUTHORED_LABEL);
     const authorId = await this.ensureLabelId(`agent:${opts.author}`);
+    const labelIds = [typeLabelId, authoredId, authorId];
+    if (proposal.complexity) {
+      labelIds.push(await this.ensureLabelId(`${COMPLEXITY_PREFIX}${proposal.complexity}`));
+    }
 
     const stateName = opts.needsApproval
       ? this.cfg.linear.statuses.needsApproval
@@ -266,9 +304,10 @@ export class LinearAdapter implements LinearPort {
       teamId: meta.teamId,
       title: proposal.title,
       description: proposal.body,
-      labelIds: [typeLabelId, authoredId, authorId],
+      labelIds,
       priority: LinearAdapter.severityToPriority(proposal.severity),
       stateId,
+      ...(meta.projectId ? { projectId: meta.projectId } : {}),
       ...(opts.parentId ? { parentId: opts.parentId } : {}),
     });
 
@@ -293,6 +332,7 @@ export class LinearAdapter implements LinearPort {
         labelIds: [typeLabelId],
         priority: LinearAdapter.severityToPriority(proposal.severity),
         stateId,
+        ...(meta.projectId ? { projectId: meta.projectId } : {}),
         parentId,
       });
       const issue = await payload.issue;
@@ -309,7 +349,10 @@ export class LinearAdapter implements LinearPort {
     const team = this.ensureTeam();
 
     const conn = await team.issues({
-      filter: { state: { type: { nin: ["completed", "canceled"] } } },
+      filter: {
+        state: { type: { nin: ["completed", "canceled"] } },
+        ...this.projectFilter(),
+      },
       first: PAGE,
     });
 
