@@ -1,8 +1,29 @@
 {
   "name": "@brianmmorton/crew",
   "version": "0.1.0",
-  "description": "Autonomous agent team: role-specialized coding agents that propose typed work into Linear, gate material changes behind human-approved PRDs, and drain approved work into PRs — running on your machine against your Claude subscription.",
+  "description": "Autonomous agent team: role-specialized coding agents that propose typed work into Linear or Jira, gate material changes behind human-approved PRDs, and drain approved work into PRs — running on your machine against your Claude subscription.",
   "type": "module",
+  "license": "MIT",
+  "author": "Brian Morton",
+  "homepage": "https://github.com/brianmmorton/crew#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/brianmmorton/crew.git"
+  },
+  "bugs": {
+    "url": "https://github.com/brianmmorton/crew/issues"
+  },
+  "keywords": [
+    "agent",
+    "agents",
+    "ai",
+    "claude",
+    "coding-agent",
+    "linear",
+    "jira",
+    "automation",
+    "cli"
+  ],
   "bin": {
     "crew": "./dist/cli/index.js"
   },
@@ -15,7 +36,11 @@
     "dev": "tsc -w -p tsconfig.json",
     "test": "node --test --import tsx \"./src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "crew": "tsx src/cli/index.ts"
+    "crew": "tsx src/cli/index.ts",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "engines": {
     "node": ">=20"
