@@ -8,6 +8,7 @@ import type {
   TrackerPort,
 } from "../types.js";
 import { createTracker, TrackerAuthError } from "../tracker/factory.js";
+import { createForge, ForgeAuthError } from "../git/forge/factory.js";
 import { GitAdapter } from "../git/git.js";
 import { PersonaRunner } from "../personas/runner.js";
 import { loadConstitution } from "../config/load.js";
@@ -57,7 +58,15 @@ export async function buildPorts(cfg: CrewConfig): Promise<Ports> {
   }
 
   const meta = await tracker.resolveMeta();
-  const git = new GitAdapter(cfg.repo.path, cfg.repo.baseBranch);
+
+  let forge;
+  try {
+    forge = await createForge(cfg);
+  } catch (e) {
+    if (e instanceof ForgeAuthError) throw new PortsError(e.message);
+    throw e;
+  }
+  const git = new GitAdapter(cfg.repo.path, cfg.repo.baseBranch, forge);
   const persona = new PersonaRunner(cfg);
 
   const agents: Record<PersonaName, AgentDef> = {};

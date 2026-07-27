@@ -72,6 +72,13 @@ export const configSchema = z.object({
   repo: z.object({
     path: z.string().default("."),
     baseBranch: z.string().default("main"),
+    // Which code host opens PRs. github shells out to `gh`; bitbucket uses the
+    // Cloud REST API (BITBUCKET_USERNAME + BITBUCKET_APP_PASSWORD, or
+    // BITBUCKET_ACCESS_TOKEN).
+    forge: z.enum(["github", "bitbucket"]).default("github"),
+    // Bitbucket only: "workspace/repo-slug". Inferred from the origin remote
+    // when omitted.
+    bitbucketRepo: z.string().optional(),
   }),
   // Exactly one of these is required; `linear:` is the pre-Jira spelling and is
   // normalized into `tracker` by loadConfig(). Both are optional here so the

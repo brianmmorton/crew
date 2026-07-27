@@ -236,9 +236,22 @@ export interface TrackerConfig {
   };
 }
 
+/** Which code host crew pushes branches to and opens pull requests on. */
+export type ForgeProvider = "github" | "bitbucket";
+
 export interface CrewConfig {
   project: string;
-  repo: { path: string; baseBranch: string };
+  repo: {
+    path: string;
+    baseBranch: string;
+    /** Code host for PR operations. Defaults to github. */
+    forge: ForgeProvider;
+    /**
+     * Bitbucket only: the `workspace/repo-slug` the branch belongs to. Inferred
+     * from the `origin` remote when omitted.
+     */
+    bitbucketRepo?: string;
+  };
   tracker: TrackerConfig;
   budget: {
     target: "max-monthly" | "fixed";
@@ -378,6 +391,18 @@ export interface OpenPrOptions {
   body: string;
   assignee: string;
   label?: string;
+}
+
+/**
+ * The code host, factored out of `GitPort` so that plain git work (worktrees,
+ * diffs, push) stays shared while only the pull-request calls vary by provider.
+ * GitHub shells out to `gh`; Bitbucket talks to the Cloud REST API.
+ */
+export interface ForgePort {
+  /** Open a PR; returns the PR url. */
+  openPr(opts: OpenPrOptions): Promise<string>;
+  /** Post a comment on an existing PR (used by reviewer agents). */
+  commentOnPr(prUrl: string, body: string): Promise<void>;
 }
 
 export interface GitPort {

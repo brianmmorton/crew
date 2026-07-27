@@ -25,6 +25,16 @@ import { MAX_RESUME_ATTEMPTS, resumeAttempts, setResumeAttempts } from "../util/
 import type { Complexity, CrewConfig as _Cfg } from "../types.js";
 
 /**
+ * How the user checks their code-host credentials, named for the forge they
+ * actually configured — a Bitbucket user has no `gh` to run.
+ */
+function authHint(cfg: CrewConfig): string {
+  return cfg.repo.forge === "bitbucket"
+    ? "your Bitbucket credentials (`crew doctor`)"
+    : "`gh auth status`";
+}
+
+/**
  * Pick the model for an item's complexity. An agent's own `model` wins (you
  * chose it deliberately for that agent), then the complexity map, then the
  * global default.
@@ -154,7 +164,7 @@ export async function implementerCycle(
         await ports.git.removeWorktree(existing).catch(() => {});
         await demote(
           `could not push/open a PR after ${MAX_RESUME_ATTEMPTS} attempts. The work was ` +
-            `discarded — please check \`gh auth status\` and the branch \`${branch}\`.`,
+            `discarded — please check ${authHint(cfg)} and the branch \`${branch}\`.`,
         );
         return { status: "error", detail: "resume attempts exhausted" };
       }

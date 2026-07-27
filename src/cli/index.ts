@@ -22,7 +22,7 @@ import {
   personasDir,
   scheduledAgents,
 } from "../agent/agents.js";
-import type { AgentDef, AgentKind, PersonaName } from "../types.js";
+import type { AgentDef, AgentKind, CrewConfig, PersonaName } from "../types.js";
 
 /** Compute the next fire time for a cron cadence, or null if it never/invalid. */
 function nextRunFor(cadence: string): Date | null {
@@ -52,6 +52,25 @@ function printSchedule(agents: AgentDef[]): void {
   for (const a of agentsOfKind(agents, "reviewer")) {
     console.log(`  ${a.name.padEnd(14)} on-pr          (runs after a PR is opened)`);
   }
+}
+
+/** One-line description of the code host, including how it authenticates. */
+function forgeSummary(cfg: CrewConfig): string {
+  if (cfg.repo.forge === "bitbucket") {
+    const where = cfg.repo.bitbucketRepo ?? "(inferred from the origin remote)";
+    return `bitbucket — ${where}`;
+  }
+  return "github — via the gh CLI";
+}
+
+/** One-line description of which coding-agent CLI drives the work. */
+function agentSummary(cfg: CrewConfig): string {
+  if (cfg.agent.provider === "claude") return "claude (built-in adapter)";
+  const bin = cfg.agent.command?.trim();
+  const args = cfg.agent.args.length ? ` ${cfg.agent.args.join(" ")}` : "";
+  return bin
+    ? `${cfg.agent.provider} — ${bin}${args} (prompt via ${cfg.agent.promptVia})`
+    : `${cfg.agent.provider} — no agent.command set`;
 }
 
 const program = new Command();
@@ -120,7 +139,7 @@ program
 
 program
   .command("doctor")
-  .description("Check that required tools (git, gh, claude) and secrets are present")
+  .description("Check that the tools and secrets your configured providers need are present")
   .action(async () => {
     const cfg = loadConfig();
     console.log("Prerequisites:");
@@ -142,10 +161,13 @@ program
     console.log(`project:      ${cfg.project}`);
     console.log(`repo:         ${cfg.repo.path} (base ${cfg.repo.baseBranch})`);
     const scope = cfg.tracker.provider === "jira" ? "component" : "project";
+    const team = cfg.tracker.provider === "jira" ? "project" : "team";
     console.log(
-      `tracker:      ${cfg.tracker.provider} — ${cfg.tracker.team}` +
+      `tracker:      ${cfg.tracker.provider} — ${team}: ${cfg.tracker.team}` +
         `${cfg.tracker.project ? ` / ${scope}: ${cfg.tracker.project}` : ""}`,
     );
+    console.log(`forge:        ${forgeSummary(cfg)}`);
+    console.log(`agent CLI:    ${agentSummary(cfg)}`);
     console.log(`backlog:      ${backlog}   (cap ${cfg.triager.backlogCap})`);
     console.log(`in progress:  ${inProgress} (WIP cap ${cfg.gates.wipCap})`);
     console.log(`agents:       ${agents.map((a) => a.name).join(", ") || "(none found)"}`);

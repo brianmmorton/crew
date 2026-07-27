@@ -40,12 +40,14 @@ project-defined verify command that must pass before a PR is opened.
 ## Requirements
 
 - **Node.js 20+** (to run crew itself; your project can be any language).
-- **git** and the **GitHub CLI** (`gh`, authenticated) for branch/PR operations.
+- **git**, plus credentials for your code host: the **GitHub CLI** (`gh`,
+  authenticated) for GitHub, or a **Bitbucket** app password / access token.
 - A **coding-agent CLI** — Claude Code (`claude`) by default, or another you
   configure.
 - A **Linear** or **Jira Cloud** account, and an API token for it.
 
-Run `crew doctor` anytime to check these.
+`crew setup` asks which of these you use and writes the answers into your
+config. Run `crew doctor` anytime to check the ones you chose.
 
 ## Install
 
@@ -60,19 +62,27 @@ npm link          # puts `crew` on your PATH
 
 ```bash
 cd ~/your-project
-crew setup                       # an agent tailors .crew/ to this repo,
-                                 # then sets up .env + .gitignore and checks prereqs
+crew setup                       # asks which tracker, code host and agent CLI
+                                 # you use, then an agent tailors .crew/ to this
+                                 # repo and sets up .env + .gitignore
 git add .crew && git commit -m "chore: add crew config"
 
 # Put your secrets in .crew/.env (read automatically — no shell exports).
-# For Linear (the default):
+# Only the ones matching your choices are needed; `crew doctor` lists them.
+# Tracker — Linear:
 #   LINEAR_API_KEY           Linear → Settings → Security & access → API keys
-# For Jira Cloud (set tracker.provider: jira in config.yaml):
+# Tracker — Jira Cloud:
 #   JIRA_HOST                your-site.atlassian.net
 #   JIRA_EMAIL               the account the token belongs to
 #   JIRA_API_TOKEN           id.atlassian.com → Security → API tokens
-# For the agent:
+# Code host — GitHub: nothing here; run `gh auth login`
+# Code host — Bitbucket Cloud:
+#   BITBUCKET_ACCESS_TOKEN   or the username/password pair below
+#   BITBUCKET_USERNAME       your username (not your email)
+#   BITBUCKET_APP_PASSWORD   Personal settings → App passwords ("Pull requests: Write")
+# Agent:
 #   CLAUDE_CODE_OAUTH_TOKEN  for the Claude provider: run `claude setup-token`
+#                            (other CLIs use their own auth)
 
 crew status                      # confirm it connects; shows the schedule
 crew run                         # run the whole team (Ctrl-C to stop)
@@ -114,6 +124,40 @@ converted to Atlassian Document Format, so markdown renders as plain text.
 
 If your config still uses the older `linear:` block, it keeps working as-is —
 it's read as `tracker:` with `provider: linear`.
+
+### Using Bitbucket
+
+The tracker and the code host are chosen independently — Bitbucket pairs with
+either Linear or Jira. Set the forge under `repo:`:
+
+```yaml
+repo:
+  path: "."
+  baseBranch: main
+  forge: "bitbucket"
+  # bitbucketRepo: "my-workspace/my-repo"   # omit to infer from the origin remote
+```
+
+Then put credentials in `.crew/.env` — either an access token (workspace,
+project, or repository scope):
+
+```bash
+BITBUCKET_ACCESS_TOKEN=...
+```
+
+...or a username + app password with the **Pull requests: Write** scope, from
+*Personal settings → App passwords*:
+
+```bash
+BITBUCKET_USERNAME=your-username     # your username, not your email
+BITBUCKET_APP_PASSWORD=...
+```
+
+crew talks to the Bitbucket Cloud REST API directly, so there's no CLI to
+install. Two differences from GitHub are worth knowing: Bitbucket pull requests
+have no labels and no assignee, so the `agent-authored` label and the assignment
+crew applies on GitHub are simply skipped; and PRs are opened with
+*close source branch* set, so merged agent branches clean themselves up.
 
 ## Commands
 

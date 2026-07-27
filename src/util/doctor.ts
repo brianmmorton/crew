@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import type { CrewConfig, Logger } from "../types.js";
 import { loadEnvFiles } from "./env.js";
 import { REQUIRED_ENV } from "../tracker/factory.js";
+import { FORGE_ENV, forgeCredentialsPresent, forgeEnvHint } from "../git/forge/factory.js";
 
 const pExecFile = promisify(execFile);
 
@@ -43,20 +44,53 @@ export async function runDoctor(
   const git = await cmd("git");
   checks.push({ name: "git", ...git, hint: "install git" });
 
-  const gh = await cmd("gh");
-  checks.push({ name: "gh (GitHub CLI)", ...gh, hint: "brew install gh" });
-  if (gh.ok) {
-    const auth = await cmd("gh", ["auth", "status"]);
+  // Code host. GitHub authenticates through the `gh` CLI; Bitbucket has no CLI
+  // to check, so its credentials are verified as env vars below.
+  if (cfg.repo.forge === "github") {
+    const gh = await cmd("gh");
+    checks.push({ name: "gh (GitHub CLI)", ...gh, hint: "brew install gh" });
+    if (gh.ok) {
+      const auth = await cmd("gh", ["auth", "status"]);
+      checks.push({
+        name: "gh auth",
+        ok: auth.ok,
+        detail: auth.ok ? "authenticated" : "not logged in",
+        hint: "gh auth login",
+      });
+    }
+  } else {
+    const ok = forgeCredentialsPresent(cfg.repo.forge);
     checks.push({
-      name: "gh auth",
-      ok: auth.ok,
-      detail: auth.ok ? "authenticated" : "not logged in",
-      hint: "gh auth login",
+      name: `${cfg.repo.forge} credentials`,
+      ok,
+      detail: ok ? "set" : `missing (${forgeEnvHint(cfg.repo.forge)})`,
+      hint: `add ${FORGE_ENV[cfg.repo.forge][0].join(" + ")} to ${cfg.configDir}/.env`,
     });
   }
 
-  const claude = await cmd("claude");
-  checks.push({ name: "claude CLI", ...claude, hint: "install Claude Code" });
+  // Agent CLI. "claude" is the built-in adapter; any other provider drives an
+  // external binary named by `agent.command`.
+  if (cfg.agent.provider === "claude") {
+    const claude = await cmd("claude");
+    checks.push({ name: "claude CLI", ...claude, hint: "install Claude Code" });
+  } else {
+    const bin = cfg.agent.command?.trim();
+    if (bin) {
+      const got = await cmd(bin);
+      checks.push({
+        name: `${cfg.agent.provider} CLI (${bin})`,
+        ...got,
+        hint: `install ${bin}, or fix agent.command in ${cfg.configDir}/config.yaml`,
+      });
+    } else {
+      checks.push({
+        name: `${cfg.agent.provider} CLI`,
+        ok: false,
+        detail: "agent.command is not set",
+        hint: `set agent.command in ${cfg.configDir}/config.yaml`,
+      });
+    }
+  }
 
   // Credentials depend on which tracker this project drives.
   for (const name of REQUIRED_ENV[cfg.tracker.provider]) {
@@ -67,13 +101,17 @@ export async function runDoctor(
       hint: `add to ${cfg.configDir}/.env`,
     });
   }
-  checks.push({
-    name: "CLAUDE_CODE_OAUTH_TOKEN",
-    ok: !!process.env.CLAUDE_CODE_OAUTH_TOKEN,
-    detail: process.env.CLAUDE_CODE_OAUTH_TOKEN ? "set" : "not set (will use cached login if present)",
-    hint: "claude setup-token",
-    soft: true,
-  });
+  // Only meaningful for the built-in Claude adapter — other CLIs carry their
+  // own auth and would show a permanently unset token here.
+  if (cfg.agent.provider === "claude") {
+    checks.push({
+      name: "CLAUDE_CODE_OAUTH_TOKEN",
+      ok: !!process.env.CLAUDE_CODE_OAUTH_TOKEN,
+      detail: process.env.CLAUDE_CODE_OAUTH_TOKEN ? "set" : "not set (will use cached login if present)",
+      hint: "claude setup-token",
+      soft: true,
+    });
+  }
 
   let allOk = true;
   for (const c of checks) {

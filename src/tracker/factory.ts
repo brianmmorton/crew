@@ -27,11 +27,12 @@ export function createTracker(cfg: CrewConfig): TrackerPort {
   const provider = cfg.tracker.provider;
   const missing = REQUIRED_ENV[provider].filter((v) => !process.env[v]?.trim());
   if (missing.length) {
+    const them = missing.length > 1 ? "them" : "it";
     throw new TrackerAuthError(
       `${missing.join(", ")} ${missing.length > 1 ? "are" : "is"} not set for tracker ` +
-        `provider "${provider}". Put ${missing.length > 1 ? "them" : "it"} (and ` +
-        `CLAUDE_CODE_OAUTH_TOKEN) in ${cfg.configDir}/.env or ~/.crew/env, or export ` +
-        `${missing.length > 1 ? "them" : "it"} in your shell.`,
+        `provider "${provider}". Put ${them} in ${cfg.configDir}/.env or ~/.crew/env, ` +
+        `or export ${them} in your shell. Run \`crew doctor\` to see everything ` +
+        `your configured providers need.`,
     );
   }
 

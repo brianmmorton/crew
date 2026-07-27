@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
 import { existsSync, realpathSync, rmSync } from "node:fs";
 import { promisify } from "node:util";
-import type { GitPort, OpenPrOptions } from "../types.js";
+import type { ForgePort, GitPort, OpenPrOptions } from "../types.js";
 import { matchesAny } from "../util/glob.js";
+import { GitHubForge } from "./forge/github.js";
 
 const pExecFile = promisify(execFile);
 
@@ -11,11 +12,22 @@ function sanitizeBranch(branch: string): string {
   return branch.replace(/[^A-Za-z0-9._-]+/g, "-");
 }
 
+/**
+ * Plain git operations (worktrees, diffs, push) plus pull requests delegated to
+ * a `ForgePort`. Everything above this layer sees one `GitPort` and never has
+ * to know which code host is behind it.
+ */
 export class GitAdapter implements GitPort {
+  private readonly forge: ForgePort;
+
   constructor(
     private readonly repoPath: string,
     private readonly baseBranch: string,
-  ) {}
+    /** Defaults to GitHub so existing callers keep their behaviour. */
+    forge?: ForgePort,
+  ) {
+    this.forge = forge ?? new GitHubForge(repoPath);
+  }
 
   /**
    * Run `git` with an explicit argv array (never a shell string) so that
@@ -177,55 +189,12 @@ export class GitAdapter implements GitPort {
   }
 
   async openPr(opts: OpenPrOptions): Promise<string> {
-    const base = ["pr", "create",
-      "--base", opts.baseBranch,
-      "--head", opts.branch,
-      "--title", opts.title,
-      "--body", opts.body,
-      "--assignee", opts.assignee,
-    ];
-
-    const run = async (args: string[]): Promise<string> => {
-      const { stdout } = await pExecFile("gh", args, {
-        cwd: opts.repoPath,
-        maxBuffer: 16 * 1024 * 1024,
-      });
-      return stdout.trim();
-    };
-
-    let stdout: string;
-    if (opts.label) {
-      try {
-        stdout = await run([...base, "--label", opts.label]);
-      } catch {
-        // Label may not exist on the repo — retry once without it.
-        stdout = await run([...base]);
-      }
-    } else {
-      stdout = await run([...base]);
-    }
-
-    // gh prints the PR URL on the last non-empty line.
-    const lines = stdout
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0);
-    const urlLine =
-      [...lines].reverse().find((l) => /^https?:\/\//.test(l)) ??
-      lines[lines.length - 1] ??
-      "";
-    return urlLine;
+    return this.forge.openPr(opts);
   }
 
-  /**
-   * Post a comment on an existing PR. `gh pr comment` accepts the PR URL
-   * directly, so this works from any cwd inside the repo.
-   */
+  /** Post a comment on an existing PR (used by reviewer agents). */
   async commentOnPr(prUrl: string, body: string): Promise<void> {
-    await pExecFile("gh", ["pr", "comment", prUrl, "--body", body], {
-      cwd: this.repoPath,
-      maxBuffer: 16 * 1024 * 1024,
-    });
+    await this.forge.commentOnPr(prUrl, body);
   }
 
   async removeWorktree(worktreePath: string): Promise<void> {

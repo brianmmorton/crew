@@ -7,6 +7,17 @@ repo:
   path: "."                    # repo root, relative to this .crew/ parent
   baseBranch: main
 
+  # Where pull requests are opened:
+  #   github     — uses the `gh` CLI, which carries its own auth (gh auth login)
+  #   bitbucket  — uses the Bitbucket Cloud REST API; needs either
+  #                BITBUCKET_ACCESS_TOKEN, or BITBUCKET_USERNAME +
+  #                BITBUCKET_APP_PASSWORD (see .env.example)
+  forge: "github"
+
+  # Bitbucket only: "workspace/repo-slug". Omit to infer it from the origin
+  # remote. Ignored when forge is "github".
+  # bitbucketRepo: "my-workspace/my-repo"
+
 # Which coding-agent CLI crew drives. "claude" is built-in (live streaming +
 # subscription auth). For any other CLI (Codex, Cursor, Grok, a local script),
 # set provider to anything else and configure the command:
