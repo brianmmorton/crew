@@ -15,7 +15,8 @@ Do the following, in order:
 - Identify this project's material / risky areas (schema & migrations, auth,
   billing, public APIs, core algorithms, infra) and its sensitive files/paths.
 - Decide which personas fit — e.g. skip **Design** if there is no UI; skip
-  **Architect** for a tiny project.
+  **Architect** for a tiny project. Consider whether this project warrants an
+  agent beyond the four built-ins (see step 3).
 
 ## 2. Ask the user a few short questions where analysis is ambiguous
 - The project's one-line purpose.
@@ -28,6 +29,14 @@ Keep it to a few questions; infer the rest.
 - `personas/*.md` — keep, trim, or add persona prompts to fit the stack and
   conventions; reference the real conventions doc and the real run/test commands
   you found. Delete personas that don't apply.
+  Each file is one agent. Its settings go in YAML frontmatter at the top:
+  `kind` (`proposer` — read-only, files issues on a cadence; `executor` —
+  implements work and opens PRs; `reviewer` — runs after a PR opens), plus
+  `cadence`, `model`, `description`, and per-kind options (`allowedTypes`,
+  `maxProposals`, `label`, `claims`, `canTransitionTo`). If this project has a
+  concern the built-ins don't cover — a security-sensitive codebase, a docs
+  site, heavy accessibility or performance requirements — propose ONE such agent
+  to the user and write it only if they agree. Don't invent agents unprompted.
 - `config.yaml` — fill in `project`; set `gates.verify` to the REAL commands
   (app -> command); set `gates.setup` to whatever prepares the env before those
   checks (activate the pinned runtime / version manager, install deps), or leave

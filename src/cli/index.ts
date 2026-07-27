@@ -12,7 +12,17 @@ import { ensureGitignored } from "../util/gitignore.js";
 import { runDoctor } from "../util/doctor.js";
 import { logger, logToFile, logFilePath } from "../util/logger.js";
 import { Cron } from "croner";
-import type { CrewConfig, PersonaName } from "../types.js";
+import { writeFileSync } from "node:fs";
+import {
+  agentsOfKind,
+  discoverPersonaFiles,
+  isValidAgentName,
+  loadAgents,
+  orphanedConfigEntries,
+  personasDir,
+  scheduledAgents,
+} from "../agent/agents.js";
+import type { AgentDef, AgentKind, PersonaName } from "../types.js";
 
 /** Compute the next fire time for a cron cadence, or null if it never/invalid. */
 function nextRunFor(cadence: string): Date | null {
@@ -26,22 +36,22 @@ function nextRunFor(cadence: string): Date | null {
   }
 }
 
-const SCHEDULED: PersonaName[] = ["qa", "design", "architect"];
-
-function printSchedule(cfg: CrewConfig, enabled: PersonaName[]): void {
-  console.log("schedule (proposers):");
-  let any = false;
-  for (const name of SCHEDULED) {
-    const p = cfg.personas[name];
-    if (!p || !enabled.includes(name) || !p.cadence || p.cadence === "continuous") continue;
-    any = true;
-    const next = nextRunFor(p.cadence);
+function printSchedule(agents: AgentDef[]): void {
+  console.log("schedule:");
+  const sched = scheduledAgents(agents).sort((a, b) => a.name.localeCompare(b.name));
+  for (const a of sched) {
+    const next = nextRunFor(a.cadence);
     console.log(
-      `  ${name.padEnd(10)} ${p.cadence.padEnd(14)} next: ${next ? next.toLocaleString() : "—"}`,
+      `  ${a.name.padEnd(14)} ${a.cadence.padEnd(14)} next: ${next ? next.toLocaleString() : "—"}`,
     );
   }
-  if (!any) console.log("  (none enabled)");
-  console.log(`  implementer  continuous    (runs whenever there is Todo work)`);
+  if (!sched.length) console.log("  (no scheduled agents)");
+  for (const a of agentsOfKind(agents, "executor")) {
+    console.log(`  ${a.name.padEnd(14)} continuous     (runs whenever there is ready work)`);
+  }
+  for (const a of agentsOfKind(agents, "reviewer")) {
+    console.log(`  ${a.name.padEnd(14)} on-pr          (runs after a PR is opened)`);
+  }
 }
 
 const program = new Command();
@@ -128,35 +138,236 @@ program
       ports.linear.countBacklog(),
       ports.linear.countInProgress(),
     ]);
-    const enabled = Object.keys(ports.prompts) as PersonaName[];
+    const agents = Object.values(ports.agents).sort((a, b) => a.name.localeCompare(b.name));
     console.log(`project:      ${cfg.project}`);
     console.log(`repo:         ${cfg.repo.path} (base ${cfg.repo.baseBranch})`);
     console.log(`linear team:  ${cfg.linear.team}${cfg.linear.project ? ` / project: ${cfg.linear.project}` : ""}`);
     console.log(`backlog:      ${backlog}   (cap ${cfg.triager.backlogCap})`);
     console.log(`in progress:  ${inProgress} (WIP cap ${cfg.gates.wipCap})`);
-    console.log(`personas:     ${enabled.join(", ") || "(none found)"}`);
+    console.log(`agents:       ${agents.map((a) => a.name).join(", ") || "(none found)"}`);
     console.log("");
-    printSchedule(cfg, enabled);
+    printSchedule(agents);
     console.log("");
     console.log(`log file:     ${logFilePath(cfg.configDir)}`);
-    console.log(`run sooner:   crew once <qa|design|architect|implementer>`);
+    console.log(`run sooner:   crew once <agent>        (see: crew agents)`);
   });
 
 program
   .command("once")
-  .argument("<persona>", "implementer | qa | design | architect")
-  .description("Run a single cycle of one persona (what launchd/cron fires on cadence)")
-  .action(async (persona: string) => {
+  .argument("<agent>", "any agent name — see `crew agents`")
+  .description("Run a single cycle of one agent (what cron fires on cadence)")
+  .action(async (name: PersonaName) => {
     const cfg = loadConfig();
+
+    // Resolve the agent from disk BEFORE building ports, so a typo fails
+    // instantly instead of behind a Linear credentials error.
+    const def = loadAgents(cfg).find((a) => a.name === name);
+    if (!def) {
+      const known = discoverPersonaFiles(cfg).join(", ") || "(none)";
+      console.error(`Unknown agent "${name}". Defined agents: ${known}`);
+      console.error(`Add one with: crew agent new ${name}`);
+      process.exit(1);
+    }
+    if (def.kind === "reviewer") {
+      console.error(
+        `"${name}" is a reviewer — it runs automatically after a PR is opened, ` +
+          `not as a standalone cycle.`,
+      );
+      process.exit(1);
+    }
+
     logToFile(logFilePath(cfg.configDir));
     const ports = await buildPorts(cfg);
-    const name = persona as PersonaName;
     const outcome =
-      name === "implementer"
+      def.kind === "executor"
         ? await implementerCycle(cfg, ports, logger)
-        : await proposerCycle(cfg, ports, name, logger);
+        : await proposerCycle(cfg, ports, def, logger);
     console.log(JSON.stringify(outcome, null, 2));
   });
+
+program
+  .command("agents")
+  .description("List every agent defined for this repo, its kind, cadence, and options")
+  .action(() => {
+    const cfg = loadConfig();
+    const agents = loadAgents(cfg).sort(
+      (a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name),
+    );
+    if (!agents.length) {
+      console.log(`No agents found in ${personasDir(cfg)}.`);
+      console.log("Create one with: crew agent new <name>");
+      return;
+    }
+
+    for (const kind of ["proposer", "executor", "reviewer"] as AgentKind[]) {
+      const group = agents.filter((a) => a.kind === kind);
+      if (!group.length) continue;
+      console.log(`\n${kind}s:`);
+      for (const a of group) {
+        const when =
+          kind === "executor"
+            ? "continuous"
+            : kind === "reviewer"
+              ? "on-pr"
+              : a.cadence || "(no cadence — never scheduled)";
+        const next = a.cadence && a.cadence !== "continuous" ? nextRunFor(a.cadence) : null;
+        console.log(
+          `  ${a.name.padEnd(16)} ${when.padEnd(16)}` +
+            `${a.builtin ? "" : "custom  "}${next ? `next: ${next.toLocaleString()}` : ""}`,
+        );
+        if (a.description) console.log(`  ${"".padEnd(16)} ${a.description}`);
+        const opts: string[] = [];
+        if (a.model) opts.push(`model=${a.model}`);
+        if (a.allowedTypes?.length) opts.push(`types=${a.allowedTypes.join("/")}`);
+        if (a.maxProposals) opts.push(`max=${a.maxProposals}`);
+        if (a.label) opts.push(`label=${a.label}`);
+        if (a.claims?.length) opts.push(`claims=${a.claims.join("/")}`);
+        if (a.canTransitionTo?.length) opts.push(`canMoveTo=${a.canTransitionTo.join("/")}`);
+        if (opts.length) console.log(`  ${"".padEnd(16)} ${opts.join("  ")}`);
+      }
+    }
+
+    if (!agentsOfKind(agents, "executor").length) {
+      console.log(
+        `\nWarning: no executor agent — nothing will implement work. ` +
+          `Expected ${personasDir(cfg)}/implementer.md`,
+      );
+    }
+    const orphans = orphanedConfigEntries(cfg);
+    if (orphans.length) {
+      console.log(
+        `\nWarning: config.yaml lists ${orphans.join(", ")} with no matching ` +
+          `personas/<name>.md — typo, or the file was deleted.`,
+      );
+    }
+    console.log(`\nRun one now:  crew once <name>`);
+  });
+
+const agentCmd = program.command("agent").description("Manage agents");
+
+agentCmd
+  .command("new")
+  .argument("<name>", "agent name (lowercase, hyphens; becomes personas/<name>.md)")
+  .option("-k, --kind <kind>", "proposer | executor | reviewer", "proposer")
+  .option("-c, --cadence <cron>", "cron cadence for proposers", "0 9 * * 1")
+  .option("-m, --model <model>", "model override (e.g. haiku, sonnet, opus)")
+  .option("-d, --description <text>", "one-line description")
+  .description("Scaffold a new agent: writes personas/<name>.md with frontmatter")
+  .action(
+    (
+      name: string,
+      opts: { kind: string; cadence: string; model?: string; description?: string },
+    ) => {
+      const cfg = loadConfig();
+      if (!isValidAgentName(name)) {
+        console.error(
+          `Invalid agent name "${name}". Use lowercase letters, digits and hyphens ` +
+            `(e.g. "security-review"), 2-40 chars.`,
+        );
+        process.exit(1);
+      }
+      const kind = opts.kind as AgentKind;
+      if (!["proposer", "executor", "reviewer"].includes(kind)) {
+        console.error(`Invalid --kind "${opts.kind}" (expected proposer | executor | reviewer)`);
+        process.exit(1);
+      }
+
+      const dir = personasDir(cfg);
+      const file = join(dir, `${name}.md`);
+      if (existsSync(file)) {
+        console.error(`${file} already exists — edit it directly.`);
+        process.exit(1);
+      }
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(file, agentTemplate(name, kind, opts), "utf8");
+
+      console.log(`Created ${file}`);
+      console.log(
+        `\nIt is live now — settings come from the frontmatter, so no config.yaml\n` +
+          `edit is needed (you can still override them there).\n`,
+      );
+      console.log(`Next:`);
+      console.log(`  1. Edit ${file} — describe what this agent should do.`);
+      if (kind === "proposer") console.log(`  2. Try it:  crew once ${name}`);
+      else if (kind === "executor")
+        console.log(`  2. Set \`claims:\` to the labels it should pick up, then: crew run`);
+      else console.log(`  2. It runs automatically after the next PR is opened.`);
+      console.log(`  3. See it listed:  crew agents`);
+    },
+  );
+
+/** Frontmatter + starter prompt for a new agent, tailored to its kind. */
+function agentTemplate(
+  name: string,
+  kind: AgentKind,
+  opts: { cadence: string; model?: string; description?: string },
+): string {
+  const fm: string[] = [`kind: ${kind}`];
+  if (kind === "proposer") fm.push(`cadence: "${opts.cadence}"`);
+  if (opts.model) fm.push(`model: ${opts.model}`);
+  fm.push(`description: "${opts.description ?? `Custom ${kind} agent`}"`);
+
+  if (kind === "proposer") {
+    fm.push(
+      `# Only file these item types (omit to allow all):`,
+      `# allowedTypes: [bug, task]`,
+      `# Cap how many items one run may file:`,
+      `# maxProposals: 5`,
+      `# Tag everything this agent files, so you can filter it in Linear:`,
+      `# label: "agent:${name}"`,
+    );
+  } else if (kind === "executor") {
+    fm.push(
+      `# Work items carrying any of these labels route to this agent instead of`,
+      `# the implementer. Unclaimed work still goes to the implementer.`,
+      `claims: []`,
+    );
+  } else {
+    fm.push(
+      `# Workflow states this reviewer may move the issue to. Empty = comments`,
+      `# only. The engine refuses anything not listed here.`,
+      `# canTransitionTo: ["Todo", "In Review"]`,
+    );
+  }
+
+  const body =
+    kind === "proposer"
+      ? `You are the **${name}** agent. You are READ-ONLY: never modify code.
+
+Describe here what this agent should look for and what it should file. Be
+specific about where to look and what counts as worth filing — a vague prompt
+produces vague issues.
+
+For each finding, file a work item with real evidence (file:line, a failing
+test name, a route). Set severity by how much it matters and complexity by how
+hard the fix is. Only file things you are confident are real. Zero findings is
+a fine answer.
+`
+      : kind === "executor"
+        ? `You are the **${name}** agent. You implement one work item at a time in an
+isolated git worktree.
+
+Describe here what makes this agent different from the default implementer —
+the kind of work it handles, the conventions it must follow, and anything it
+should refuse to do.
+
+Make exactly ONE atomic commit, or no commit if you cannot complete the task
+cleanly. The runner handles pushing and opening the PR.
+`
+        : `You are the **${name}** agent. You review pull requests opened by the team.
+You are READ-ONLY and you perform no actions yourself — you return a verdict and
+the engine applies it.
+
+Describe here what this agent should check for on every PR: the specific risks,
+conventions, or regressions it owns. Be concrete about what should block versus
+what is just a comment.
+
+Cite file:line in your comments. If the change looks good, say so briefly
+rather than inventing objections.
+`;
+
+  return `---\n${fm.join("\n")}\n---\n\n${body}`;
+}
 
 program
   .command("run")

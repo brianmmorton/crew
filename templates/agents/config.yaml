@@ -78,11 +78,50 @@ models:
     medium: "sonnet"  # balanced
     high: "opus"      # strongest
 
+# --- Agents ------------------------------------------------------------------
+# Every `personas/<name>.md` file is an agent. Add your own with
+# `crew agent new <name>` (or just drop in a file) and list it with
+# `crew agents`. Settings can live here OR as YAML frontmatter in the persona
+# file itself; this block wins where both set the same field.
+#
+# Each agent has a `kind`:
+#   proposer  read-only; analyzes the repo on a cadence and files work items
+#   executor  claims a work item, implements it in a worktree, opens a PR
+#   reviewer  runs after a PR opens; comments and (if allowed) moves the issue
+#
+# The built-ins default to the right kind, so they need only a cadence.
+# Options every agent may set: model, description.
+# Proposers/reviewers also: allowedTypes, maxProposals, label.
+# Executors also: claims. Reviewers also: canTransitionTo.
 personas:
   implementer: { cadence: "continuous" }
   qa:          { cadence: "0 */6 * * *" }
   # design:    { cadence: "0 9 * * 1,4" }   # enable if the project has a UI
   # architect: { cadence: "0 9 * * 2,5" }
+
+  # Examples of custom agents (create the .md file first):
+  #
+  # A proposer restricted to filing at most 3 bugs, tagged for filtering:
+  # a11y:
+  #   kind: proposer
+  #   cadence: "0 8 * * 1"
+  #   allowedTypes: [bug]
+  #   maxProposals: 3
+  #   label: "agent:a11y"
+  #
+  # An executor that handles doc work instead of the implementer. Items whose
+  # labels match `claims` route here; everything else still goes to implementer.
+  # docs-writer:
+  #   kind: executor
+  #   claims: ["type:docs"]
+  #   model: haiku
+  #
+  # A reviewer that inspects every PR. It may comment freely, but can only move
+  # the issue to states you list here — anything else is refused by the engine.
+  # security:
+  #   kind: reviewer
+  #   model: opus
+  #   canTransitionTo: ["Todo"]
 
 triager:
   cadence: "0 * * * *"

@@ -80,13 +80,17 @@ One-time in Linear: add a workflow status named **Needs Approval** (type
 | `crew setup` | Onboard a repo: an agent tailors the config, then sets up `.env`/`.gitignore` |
 | `crew init` | Scaffold generic `.crew/` templates without the agent |
 | `crew doctor` | Check required tools and secrets are present |
-| `crew status` | Backlog / WIP counts, the proposer schedule, and log path |
-| `crew once <persona>` | Run one cycle of `implementer`/`qa`/`design`/`architect` now |
-| `crew run` | Run the whole team in one process (executor loop + scheduled proposers) |
+| `crew status` | Backlog / WIP counts, the agent schedule, and log path |
+| `crew agents` | List every agent, its kind, cadence, and options |
+| `crew agent new <name>` | Scaffold a new agent (`--kind proposer\|executor\|reviewer`) |
+| `crew once <agent>` | Run one cycle of any agent now |
+| `crew run` | Run the whole team in one process (executor loop + scheduled agents) |
 
-While `crew run` is attached to a terminal it accepts single-key controls:
-`q`/`d`/`a` run QA/Design/Architect now, `i` nudges the executor, `k` kills the
-running agent, `p` pauses/resumes, `s` prints status, `Ctrl-C` quits.
+While `crew run` is attached to a terminal it accepts single-key controls. Each
+scheduled agent gets a key (its first free letter — `q` QA, `d` Design, `a`
+Architect, and so on for your own), plus `i` nudges the executor, `k` kills the
+running agent, `p` pauses/resumes, `s` prints status, `Ctrl-C` quits. The exact
+legend is printed at startup.
 
 ## Configuration
 
@@ -105,9 +109,90 @@ of `config.yaml`:
   never modify), and `wipCap`.
 - **linear** — `team`, an optional `project` to scope this repo, workflow state
   names, and `autoPromote` (non-material proposals go straight to ready).
-- **personas** — per-persona cron cadences.
+- **personas** — your agents; see below.
 
 The `.crew/` directory name can be overridden with the `CREW_DIR` env var.
+
+## Agents
+
+The four agents crew ships with — Implementer, QA, Design, Architect — are not
+special. Each is just a prompt at `.crew/personas/<name>.md`, and you can add
+your own the same way. Every agent has a **kind** that decides how the engine
+drives it:
+
+| Kind | When it runs | What it does |
+|---|---|---|
+| `proposer` | on a cron cadence | Reads the repo read-only and files typed work items |
+| `executor` | whenever there's ready work | Implements one item in a worktree and opens a PR |
+| `reviewer` | after a PR is opened | Comments on the PR / Linear issue, can move the issue |
+
+Create one with the scaffolder, then edit the prompt it writes:
+
+```bash
+crew agent new a11y --cadence "0 8 * * 1"     # a proposer (the default)
+crew agent new docs-writer --kind executor
+crew agent new security --kind reviewer --model opus
+crew agents                                   # see them all
+crew once a11y                                # try it right now
+```
+
+Or just drop a `.md` file into `.crew/personas/` — it's picked up automatically.
+
+### Configuring an agent
+
+Settings go in YAML frontmatter at the top of the persona file, or in the
+`personas:` block of `config.yaml` (which wins where both set the same field —
+handy for overriding a shared persona per project):
+
+```markdown
+---
+kind: proposer
+cadence: "0 8 * * 1"
+model: haiku
+allowedTypes: [bug]        # may only file bugs
+maxProposals: 3            # at most 3 per run
+label: "agent:a11y"        # tag its output so you can filter it in Linear
+---
+
+You are the accessibility agent. Audit for…
+```
+
+| Option | Applies to | Meaning |
+|---|---|---|
+| `kind` | all | `proposer` (default), `executor`, or `reviewer` |
+| `cadence` | proposers | Cron schedule; omit and it only runs via `crew once` |
+| `model` | all | Model override for this agent |
+| `description` | all | One-liner shown in `crew agents` |
+| `allowedTypes` | proposers, reviewers | Item types it may file; others are discarded |
+| `maxProposals` | proposers, reviewers | Cap on items filed per run |
+| `label` | proposers, reviewers | Extra Linear label on everything it files |
+| `claims` | executors | Item labels that route work to this agent |
+| `canTransitionTo` | reviewers | Workflow states it may move an issue to |
+
+`allowedTypes`, `maxProposals`, and `canTransitionTo` are enforced by the engine
+after the agent runs, not just requested in the prompt — a custom agent can't
+flood your backlog or move an issue somewhere you didn't allow.
+
+### Custom executors
+
+An executor claims work by label. Give it `claims: ["type:docs"]` and any ready
+item carrying that label routes to it instead of the implementer; everything
+unclaimed still goes to the implementer, so adding one never strands work. One
+agent runs at a time under the existing `wipCap`.
+
+### Reviewers
+
+A reviewer runs against the branch right after its PR opens. Like every other
+agent it performs no actions itself — it returns a verdict and the engine
+applies it: a comment on the PR, a comment on the Linear issue, follow-up items,
+and a state transition *if* the target is listed in `canTransitionTo` (empty
+means comment-only). A reviewer that fails never blocks the PR.
+
+Be deliberate about `canTransitionTo`. Listing your *ready* state (`Todo` by
+default) means a rejected item becomes executable again and the executor will
+rework it — useful, but if the reviewer keeps objecting the pair can loop and
+burn usage. crew logs a loud warning each time this happens; watch for it, or
+give the reviewer a state that parks the work instead (e.g. `Backlog`).
 
 ## Providers
 
@@ -118,6 +203,15 @@ agent's work. The agent is responsible for setting up its own toolchain; crew
 never assumes one.
 
 ## Safety
+
+If a task commits and passes verification but then fails to land — a push
+rejection, a `gh` outage, an expired token — crew **keeps the worktree** instead
+of discarding it. The next cycle finds the existing commit and retries just the
+push and PR, with no second agent run and no tokens spent. After three failed
+attempts it gives up, removes the worktree, and demotes the issue to your
+backlog with a comment. Failures *before* a good commit (no commit, protected
+paths touched, verification failed) still clean up, since those need a fresh
+attempt.
 
 Every task runs in an isolated git worktree on a throwaway branch; the executor
 never touches your main branch. A `noTouch` list protects secrets, migrations,

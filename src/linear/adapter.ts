@@ -283,16 +283,38 @@ export class LinearAdapter implements LinearPort {
 
   async createIssue(
     proposal: Proposal,
-    opts: { author: PersonaName; parentId?: string; needsApproval?: boolean },
+    opts: {
+      author: PersonaName;
+      parentId?: string;
+      needsApproval?: boolean;
+      label?: string;
+    },
   ): Promise<WorkItem> {
     const meta = this.ensureMeta();
 
-    const typeLabelId = await this.ensureLabelId(this.typeToLabelName(proposal.type));
-    const authoredId = await this.ensureLabelId(AGENT_AUTHORED_LABEL);
-    const authorId = await this.ensureLabelId(`agent:${opts.author}`);
-    const labelIds = [typeLabelId, authoredId, authorId];
+    // Collect label names first, then dedupe: Linear rejects the whole mutation
+    // if labelIds repeats an id. An agent whose `label` option equals a label we
+    // already add (e.g. label "agent:product" on the agent named "product", or
+    // any "type:*") would otherwise fail every create it attempts.
+    const labelNames = [
+      this.typeToLabelName(proposal.type),
+      AGENT_AUTHORED_LABEL,
+      `agent:${opts.author}`,
+    ];
     if (proposal.complexity) {
-      labelIds.push(await this.ensureLabelId(`${COMPLEXITY_PREFIX}${proposal.complexity}`));
+      labelNames.push(`${COMPLEXITY_PREFIX}${proposal.complexity}`);
+    }
+    // An agent's own `label` option, so its output can be filtered in Linear.
+    if (opts.label?.trim()) {
+      labelNames.push(opts.label.trim());
+    }
+
+    const labelIds: string[] = [];
+    for (const name of new Set(labelNames)) {
+      const id = await this.ensureLabelId(name);
+      // Distinct names can still resolve to one id (Linear label names are
+      // case-insensitive), so dedupe on the resolved id too.
+      if (!labelIds.includes(id)) labelIds.push(id);
     }
 
     const stateName = opts.needsApproval

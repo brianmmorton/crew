@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { rmSync } from "node:fs";
+import { existsSync, realpathSync, rmSync } from "node:fs";
 import { promisify } from "node:util";
 import type { GitPort, OpenPrOptions } from "../types.js";
 import { matchesAny } from "../util/glob.js";
@@ -51,6 +51,37 @@ export class GitAdapter implements GitPort {
     }
   }
 
+  /**
+   * Path of an existing, usable worktree for `branch`, or null. "Usable" means
+   * the directory is present AND git still tracks it as a worktree — a pruned
+   * or hand-deleted one must not be resumed.
+   */
+  async findWorktree(branch: string): Promise<string | null> {
+    const wt = this.worktreePath(branch);
+    if (!existsSync(wt)) return null;
+    try {
+      const list = await this.git(["-C", this.repoPath, "worktree", "list", "--porcelain"]);
+      // Compare resolved paths: `worktree list` reports symlink-resolved paths
+      // (on macOS /tmp -> /private/tmp), which would otherwise never match.
+      const want = realpathSync(wt);
+      const tracked = list
+        .split("\n")
+        .filter((l) => l.startsWith("worktree "))
+        .map((l) => l.slice("worktree ".length).trim());
+      return tracked.some((p) => {
+        try {
+          return realpathSync(p) === want;
+        } catch {
+          return false;
+        }
+      })
+        ? wt
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
   async createWorktree(branch: string): Promise<string> {
     const wt = this.worktreePath(branch);
 
@@ -64,9 +95,10 @@ export class GitAdapter implements GitPort {
     } catch {
       /* ignore */
     }
-    // Delete a leftover local branch from a prior failed attempt. Safe: a
-    // successful run's branch is on In Review (not re-selected), so anything
-    // still named agent/<id> here belongs to an attempt that never opened a PR.
+    // Delete a leftover local branch from a prior failed attempt. Safe on two
+    // counts: a successful run's branch is on In Review (not re-selected), and
+    // the executor only calls this when findWorktree() found nothing resumable
+    // — a preserved worktree holding a real commit never reaches here.
     await this.git(["-C", this.repoPath, "branch", "-D", branch]).catch(() => {});
 
     await this.git([
@@ -183,6 +215,17 @@ export class GitAdapter implements GitPort {
       lines[lines.length - 1] ??
       "";
     return urlLine;
+  }
+
+  /**
+   * Post a comment on an existing PR. `gh pr comment` accepts the PR URL
+   * directly, so this works from any cwd inside the repo.
+   */
+  async commentOnPr(prUrl: string, body: string): Promise<void> {
+    await pExecFile("gh", ["pr", "comment", prUrl, "--body", body], {
+      cwd: this.repoPath,
+      maxBuffer: 16 * 1024 * 1024,
+    });
   }
 
   async removeWorktree(worktreePath: string): Promise<void> {

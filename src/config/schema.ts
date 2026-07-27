@@ -57,8 +57,30 @@ export const configSchema = z.object({
         .default([".env*", "**/migrations/**", ".github/**"]),
     })
     .default({}),
+  // Per-agent settings, keyed by persona name. Every key is optional: a persona
+  // file with no entry here still works (see src/agent/agents.ts). The same
+  // fields may be written as frontmatter in personas/<name>.md; this block wins.
   personas: z
-    .record(z.object({ cadence: z.string(), model: z.string().optional() }))
+    .record(
+      z.object({
+        // proposer (default) | executor | reviewer
+        kind: z.enum(["proposer", "executor", "reviewer"]).optional(),
+        cadence: z.string().optional(),
+        model: z.string().optional(),
+        description: z.string().optional(),
+        // proposer/reviewer: restrict what it may file, and cap the volume.
+        allowedTypes: z
+          .array(z.enum(["prd", "bug", "task", "chore-dx", "spike"]))
+          .optional(),
+        maxProposals: z.number().int().min(1).optional(),
+        // extra Linear label applied to everything this agent files
+        label: z.string().optional(),
+        // executor: labels this agent claims (unclaimed work → implementer)
+        claims: z.array(z.string()).optional(),
+        // reviewer: workflow states it may move an issue to (empty = comment only)
+        canTransitionTo: z.array(z.string()).optional(),
+      }),
+    )
     .default({}),
   agent: z
     .object({

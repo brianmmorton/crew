@@ -6,6 +6,7 @@ import { proposerCycle } from "./cycles.js";
 import { runExecutorLoop, requestStop, wakeExecutor, setPaused } from "./loop.js";
 import { killActiveRuns } from "../personas/runner.js";
 import { readState, writeState } from "../util/state.js";
+import { scheduledAgents } from "../agent/agents.js";
 
 export interface RunOptions {
   /** Schedule the proposer personas on their cadence (default true). */
@@ -14,29 +15,62 @@ export interface RunOptions {
   kickoff: boolean;
 }
 
+/**
+ * A hotkey action: one of the fixed controls, or `{ run: <agent> }` to fire a
+ * scheduled agent now. Agent keys are assigned dynamically at startup, so
+ * custom agents get hotkeys too.
+ */
 export type HotAction =
-  | "qa"
-  | "design"
-  | "architect"
   | "impl"
   | "pause"
   | "status"
   | "kill"
   | "quit"
+  | { run: PersonaName }
   | null;
 
-const PROPOSERS: PersonaName[] = ["qa", "design", "architect"];
+/** Keys the fixed controls own; agents can never be assigned these. */
+const RESERVED = new Set(["i", "p", "s", "k", "c"]);
+
+/**
+ * Assign a hotkey to each scheduled agent: its first unused letter, else a
+ * digit. Deterministic given the same ordered list, so the legend is stable
+ * across restarts.
+ */
+export function assignKeys(names: PersonaName[]): Map<string, PersonaName> {
+  const map = new Map<string, PersonaName>();
+  const taken = new Set(RESERVED);
+  const leftovers: PersonaName[] = [];
+
+  for (const name of names) {
+    const letter = [...name.toLowerCase()].find(
+      (ch) => /[a-z]/.test(ch) && !taken.has(ch),
+    );
+    if (letter) {
+      taken.add(letter);
+      map.set(letter, name);
+    } else {
+      leftovers.push(name);
+    }
+  }
+  // Anything that couldn't get a letter falls back to 1-9.
+  let digit = 1;
+  for (const name of leftovers) {
+    if (digit > 9) break;
+    map.set(String(digit++), name);
+  }
+  return map;
+}
 
 /** Map a keypress to an action. Pure, for testability. */
-export function keyToAction(name: string | undefined, ctrl: boolean): HotAction {
+export function keyToAction(
+  name: string | undefined,
+  ctrl: boolean,
+  keys: Map<string, PersonaName> = new Map(),
+): HotAction {
   if (ctrl && name === "c") return "quit";
+  if (!name) return null;
   switch (name) {
-    case "q":
-      return "qa";
-    case "d":
-      return "design";
-    case "a":
-      return "architect";
     case "i":
       return "impl";
     case "p":
@@ -45,8 +79,10 @@ export function keyToAction(name: string | undefined, ctrl: boolean): HotAction 
       return "status";
     case "k":
       return "kill";
-    default:
-      return null;
+    default: {
+      const agent = keys.get(name);
+      return agent ? { run: agent } : null;
+    }
   }
 }
 
@@ -81,8 +117,11 @@ export function dueOnStartup(
   return now - t >= scheduleInterval(cadence);
 }
 
-const LEGEND =
-  "[q]QA  [d]Design  [a]Architect  [i]impl-now  [k]kill-run  [p]pause  [s]status  [Ctrl-C]quit";
+/** Build the control legend from the dynamically-assigned agent keys. */
+export function buildLegend(keys: Map<string, PersonaName>): string {
+  const agents = [...keys.entries()].map(([k, n]) => `[${k}]${n}`).join("  ");
+  return `${agents}${agents ? "  " : ""}[i]impl-now  [k]kill-run  [p]pause  [s]status  [Ctrl-C]quit`;
+}
 
 /**
  * Run the whole team in one process: the continuous executor loop plus proposers
@@ -104,18 +143,20 @@ export async function runSupervised(
   state.startedAt = new Date().toISOString();
   writeState(cfg.configDir, state);
 
-  const isEnabled = (name: PersonaName): boolean => {
-    const p = cfg.personas[name];
-    return !!p && !!ports.prompts[name] && !!p.cadence && p.cadence !== "continuous";
-  };
+  // Every agent with a cron cadence — built-in or user-defined. Reviewers are
+  // driven by the executor cycle, not scheduled, so they're excluded here.
+  const scheduled = scheduledAgents(Object.values(ports.agents))
+    .filter((a) => a.kind === "proposer")
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const keys = assignKeys(scheduled.map((a) => a.name));
 
   const runProposerSafe = async (
     name: PersonaName,
     manual = false,
   ): Promise<void> => {
     if (teamPaused && !manual) return;
-    if (!ports.prompts[name]) {
-      logger.warn(`${name}: not enabled (no prompt); ignoring`);
+    if (!ports.agents[name]) {
+      logger.warn(`${name}: not enabled (no personas/${name}.md); ignoring`);
       return;
     }
     if (busy.has(name)) {
@@ -137,13 +178,21 @@ export async function runSupervised(
 
   // --- schedule proposers -----------------------------------------------------
   if (opts.proposers) {
-    for (const name of PROPOSERS) {
-      if (!isEnabled(name)) continue;
-      const cadence = cfg.personas[name]!.cadence;
-      const job = new Cron(cadence, { name, protect: true }, () => runProposerSafe(name));
+    for (const a of scheduled) {
+      let job: Cron;
+      try {
+        job = new Cron(a.cadence, { name: a.name, protect: true }, () =>
+          runProposerSafe(a.name),
+        );
+      } catch (e) {
+        logger.error(`${a.name}: invalid cadence "${a.cadence}"; not scheduled`, {
+          error: String(e),
+        });
+        continue;
+      }
       jobs.push(job);
-      logger.info(`scheduled ${name}`, {
-        cadence,
+      logger.info(`scheduled ${a.name}`, {
+        cadence: a.cadence,
         next: job.nextRun()?.toISOString() ?? null,
       });
     }
@@ -188,13 +237,12 @@ export async function runSupervised(
   };
 
   const onAction = (a: HotAction): void => {
+    if (a && typeof a === "object") {
+      logger.info(`hotkey: run ${a.run} now`);
+      void runProposerSafe(a.run, true);
+      return;
+    }
     switch (a) {
-      case "qa":
-      case "design":
-      case "architect":
-        logger.info(`hotkey: run ${a} now`);
-        void runProposerSafe(a, true);
-        break;
       case "impl":
         logger.info("hotkey: nudging executor to check for work now");
         wakeExecutor();
@@ -232,20 +280,19 @@ export async function runSupervised(
     }
     process.stdin.on("keypress", (_s: string, key: { name?: string; ctrl?: boolean } | undefined) => {
       if (!key) return;
-      onAction(keyToAction(key.name, !!key.ctrl));
+      onAction(keyToAction(key.name, !!key.ctrl, keys));
     });
-    logger.info(`controls: ${LEGEND}`);
+    logger.info(`controls: ${buildLegend(keys)}`);
   } else {
     logger.info("no TTY detected; hotkeys disabled (running headless)");
   }
 
   // --- immediate first pass (catch-up) ---------------------------------------
   if (opts.proposers) {
-    for (const name of PROPOSERS) {
-      if (!isEnabled(name)) continue;
-      if (opts.kickoff || dueOnStartup(cfg.personas[name]!.cadence, state.lastRun[name])) {
-        logger.info(`startup: running ${name} now (${opts.kickoff ? "kickoff" : "catch-up"})`);
-        void runProposerSafe(name, true);
+    for (const a of scheduled) {
+      if (opts.kickoff || dueOnStartup(a.cadence, state.lastRun[a.name])) {
+        logger.info(`startup: running ${a.name} now (${opts.kickoff ? "kickoff" : "catch-up"})`);
+        void runProposerSafe(a.name, true);
       }
     }
   }
