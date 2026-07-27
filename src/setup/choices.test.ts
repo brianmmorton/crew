@@ -129,12 +129,6 @@ test("requiredEnvFor names only the chosen providers' credentials", () => {
   );
   assert.deepEqual(
     requiredEnvFor({ tracker: "jira", forge: "bitbucket", agent: preset("codex") }),
-    [
-      "JIRA_HOST",
-      "JIRA_EMAIL",
-      "JIRA_API_TOKEN",
-      "BITBUCKET_USERNAME",
-      "BITBUCKET_APP_PASSWORD",
-    ],
+    ["JIRA_HOST", "JIRA_EMAIL", "JIRA_API_TOKEN", "BITBUCKET_ACCESS_TOKEN"],
   );
 });

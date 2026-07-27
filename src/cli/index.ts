@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { fileURLToPath } from "node:url";
-import { cpSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { loadConfig, crewDirName } from "../config/load.js";
 import { buildPorts } from "../engine/ports.js";
@@ -54,6 +54,20 @@ function printSchedule(agents: AgentDef[]): void {
   }
 }
 
+/**
+ * crew's own version, read from the installed package.json rather than
+ * hardcoded — the literal that used to live here had already drifted behind a
+ * version bump, which is exactly what `crew --version` must not do.
+ */
+function packageVersion(): string {
+  try {
+    const pkg = fileURLToPath(new URL("../../package.json", import.meta.url));
+    return (JSON.parse(readFileSync(pkg, "utf8")) as { version?: string }).version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 /** One-line description of the code host, including how it authenticates. */
 function forgeSummary(cfg: CrewConfig): string {
   if (cfg.repo.forge === "bitbucket") {
@@ -77,7 +91,7 @@ const program = new Command();
 program
   .name("crew")
   .description("Autonomous agent team: propose typed work into Linear or Jira, gate material changes behind human-approved PRDs, drain approved work into PRs.")
-  .version("0.1.0");
+  .version(packageVersion());
 
 /** Recursively copy template tree into dest, never overwriting existing files. */
 function copyNoOverwrite(src: string, dest: string): string[] {

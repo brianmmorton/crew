@@ -68,6 +68,18 @@ tracker:
     done: "Done"
   approvedStates: ["Todo", "In Progress", "In Review", "Done"]
 
+  # Narrow what the executor may claim out of the ready state. Both lists are
+  # empty by default, which means every ready item is fair game. This gates
+  # *selection*, unlike a persona's `claims`, which only routes an already-
+  # selected item to a particular executor.
+  executable:
+    # Non-empty = an item must carry at least one of these labels to be worked.
+    # Use this to keep crew to an opt-in slice of a shared board.
+    requireLabels: []
+    # Items carrying any of these are never claimed, even if they also satisfy
+    # requireLabels. Unlabeled items are unaffected.
+    excludeLabels: []
+
   # Jira-only. Ignored when provider is "linear".
   jira:
     # Jira requires a real issue type on every create (unlike Linear, where the

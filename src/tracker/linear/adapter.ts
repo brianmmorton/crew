@@ -134,6 +134,28 @@ export class LinearAdapter implements TrackerPort {
     return pid ? { project: { id: { eq: pid } } } : {};
   }
 
+  /**
+   * Issue-filter fragment for the executable label gate, so an excluded item
+   * never occupies a slot in the `first: PAGE` window. `isExecutable` applies
+   * the same rules again client-side — this is an optimization, not the
+   * enforcement point.
+   *
+   * `every: { nin }` is vacuously true for an issue with no labels, so an
+   * exclude-only config still picks up unlabeled work. (Jira's equivalent needs
+   * an explicit `labels is EMPTY` for this — see JiraAdapter.labelClause.)
+   */
+  private labelFilter(): Record<string, unknown> {
+    const gate = this.cfg.tracker.executable;
+    const and: Record<string, unknown>[] = [];
+    if (gate?.requireLabels?.length) {
+      and.push({ labels: { some: { name: { in: gate.requireLabels } } } });
+    }
+    if (gate?.excludeLabels?.length) {
+      and.push({ labels: { every: { name: { nin: gate.excludeLabels } } } });
+    }
+    return and.length ? { and } : {};
+  }
+
   private stateIdOrThrow(stateName: string): string {
     const meta = this.ensureMeta();
     const id = meta.stateIds[stateName];
@@ -193,6 +215,7 @@ export class LinearAdapter implements TrackerPort {
       filter: {
         state: { name: { eq: this.cfg.tracker.statuses.ready } },
         ...this.projectFilter(),
+        ...this.labelFilter(),
       },
       first: PAGE,
     });

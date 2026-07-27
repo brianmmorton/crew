@@ -122,18 +122,60 @@ test("openPr falls back to a rebuilt URL when links are absent", async () => {
   assert.equal(url, "https://bitbucket.org/acme/widgets/pull-requests/9");
 });
 
-test("an access token authenticates as Bearer, a username/password as Basic", async () => {
-  const token = recorder({ id: 1 });
-  await new BitbucketForge({ accessToken: "t0k" }, "a/b", token.fetchImpl).openPr({
+/** Open a throwaway PR just to capture the Authorization header. */
+async function authHeaderFor(auth: ConstructorParameters<typeof BitbucketForge>[0]) {
+  const { calls, fetchImpl } = recorder({ id: 1 });
+  await new BitbucketForge(auth, "a/b", fetchImpl).openPr({
     repoPath: "/r", branch: "b", baseBranch: "main", title: "t", body: "d", assignee: "@me",
   });
-  assert.equal(token.calls[0].auth, "Bearer t0k");
+  return calls[0].auth;
+}
 
-  const basic = recorder({ id: 1 });
-  await new BitbucketForge({ username: "u", appPassword: "p" }, "a/b", basic.fetchImpl).openPr({
-    repoPath: "/r", branch: "b", baseBranch: "main", title: "t", body: "d", assignee: "@me",
-  });
-  assert.equal(basic.calls[0].auth, `Basic ${Buffer.from("u:p").toString("base64")}`);
+test("an access token authenticates as Bearer", async () => {
+  assert.equal(await authHeaderFor({ accessToken: "t0k" }), "Bearer t0k");
+});
+
+test("an Atlassian API token authenticates as Basic with the account email", async () => {
+  // The API token replaced app passwords when Atlassian removed them on
+  // 2026-07-28. It is Basic auth like an app password, but keyed by EMAIL —
+  // sending a username here is a silent 401, so this pins the pairing.
+  assert.equal(
+    await authHeaderFor({ email: "me@example.com", apiToken: "tok" }),
+    `Basic ${Buffer.from("me@example.com:tok").toString("base64")}`,
+  );
+});
+
+test("a legacy app password still forms a Basic header, keyed by username", async () => {
+  assert.equal(
+    await authHeaderFor({ username: "u", appPassword: "p" }),
+    `Basic ${Buffer.from("u:p").toString("base64")}`,
+  );
+});
+
+test("an access token wins over the other credential shapes", async () => {
+  assert.equal(
+    await authHeaderFor({
+      accessToken: "t0k",
+      email: "me@example.com",
+      apiToken: "tok",
+      username: "u",
+      appPassword: "p",
+    }),
+    "Bearer t0k",
+  );
+});
+
+test("an API token wins over a legacy app password", async () => {
+  // Someone mid-migration may have both set; the working credential must win.
+  assert.equal(
+    await authHeaderFor({
+      email: "me@example.com",
+      apiToken: "tok",
+      username: "u",
+      appPassword: "p",
+    }),
+    `Basic ${Buffer.from("me@example.com:tok").toString("base64")}`,
+  );
 });
 
 test("commentOnPr targets the repo named in the URL, not the configured one", async () => {

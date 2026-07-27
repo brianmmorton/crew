@@ -24,7 +24,14 @@ export class ForgeAuthError extends Error {}
  */
 export const FORGE_ENV: Record<ForgeProvider, string[][]> = {
   github: [],
-  bitbucket: [["BITBUCKET_ACCESS_TOKEN"], ["BITBUCKET_USERNAME", "BITBUCKET_APP_PASSWORD"]],
+  bitbucket: [
+    ["BITBUCKET_ACCESS_TOKEN"],
+    ["BITBUCKET_EMAIL", "BITBUCKET_API_TOKEN"],
+    // App passwords were removed by Atlassian on 2026-07-28. Still accepted so
+    // an existing config reaches createForge() and gets the warning there,
+    // rather than being reported as "no credentials at all".
+    ["BITBUCKET_USERNAME", "BITBUCKET_APP_PASSWORD"],
+  ],
 };
 
 /** True when at least one of the accepted credential sets is fully present. */
@@ -95,14 +102,25 @@ export async function createForge(cfg: CrewConfig): Promise<ForgePort> {
             `in ${cfg.configDir}/.env or ~/.crew/env, or export them in your shell.`,
         );
       }
-      return new BitbucketForge(
-        {
-          accessToken: process.env.BITBUCKET_ACCESS_TOKEN?.trim() || undefined,
-          username: process.env.BITBUCKET_USERNAME?.trim() || undefined,
-          appPassword: process.env.BITBUCKET_APP_PASSWORD?.trim() || undefined,
-        },
-        await resolveBitbucketRepo(cfg),
-      );
+      const auth = {
+        accessToken: process.env.BITBUCKET_ACCESS_TOKEN?.trim() || undefined,
+        email: process.env.BITBUCKET_EMAIL?.trim() || undefined,
+        apiToken: process.env.BITBUCKET_API_TOKEN?.trim() || undefined,
+        username: process.env.BITBUCKET_USERNAME?.trim() || undefined,
+        appPassword: process.env.BITBUCKET_APP_PASSWORD?.trim() || undefined,
+      };
+      // Atlassian removed app passwords on 2026-07-28: they now fail with a
+      // bare 401 that looks like a wrong password. Say so up front, but don't
+      // refuse — a self-hosted proxy or a clock-skewed rollout might still work,
+      // and that call isn't ours to make.
+      if (auth.appPassword && !auth.accessToken && !auth.apiToken) {
+        console.warn(
+          "crew: BITBUCKET_APP_PASSWORD is set, but Atlassian removed Bitbucket app " +
+            "passwords on 2026-07-28 — requests will likely fail with 401. Switch to " +
+            "BITBUCKET_ACCESS_TOKEN, or BITBUCKET_EMAIL + BITBUCKET_API_TOKEN.",
+        );
+      }
+      return new BitbucketForge(auth, await resolveBitbucketRepo(cfg));
     }
 
     default: {

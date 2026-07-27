@@ -57,6 +57,56 @@ test("isExecutable rejects items whose parent is not approved", () => {
   assert.equal(isExecutable(item({ parentApproved: false }), cfg), false);
 });
 
+/** cfg with a label gate layered over the shared base. */
+function gated(gate: { requireLabels?: string[]; excludeLabels?: string[] }): CrewConfig {
+  return {
+    ...cfg,
+    tracker: {
+      ...cfg.tracker,
+      executable: { requireLabels: [], excludeLabels: [], ...gate },
+    },
+  } as unknown as CrewConfig;
+}
+
+test("label gate is inert when both lists are empty", () => {
+  const empty = gated({});
+  assert.equal(isExecutable(item({ labels: [] }), empty), true);
+  assert.equal(isExecutable(item({ labels: ["anything"] }), empty), true);
+  // and when tracker.executable is absent entirely (configs written before it)
+  assert.equal(isExecutable(item({ labels: [] }), cfg), true);
+});
+
+test("requireLabels admits only items carrying one of them", () => {
+  const g = gated({ requireLabels: ["crew", "agent-ok"] });
+  assert.equal(isExecutable(item({ labels: ["crew"] }), g), true);
+  assert.equal(isExecutable(item({ labels: ["agent-ok"] }), g), true);
+  assert.equal(isExecutable(item({ labels: ["crew", "other"] }), g), true);
+  assert.equal(isExecutable(item({ labels: ["other"] }), g), false);
+  assert.equal(isExecutable(item({ labels: [] }), g), false);
+});
+
+test("excludeLabels blocks matching items but keeps unlabeled work", () => {
+  const g = gated({ excludeLabels: ["blocked", "needs-human"] });
+  assert.equal(isExecutable(item({ labels: ["blocked"] }), g), false);
+  assert.equal(isExecutable(item({ labels: ["needs-human"] }), g), false);
+  assert.equal(isExecutable(item({ labels: ["crew"] }), g), true);
+  assert.equal(isExecutable(item({ labels: [] }), g), true);
+});
+
+test("excludeLabels wins over requireLabels", () => {
+  const g = gated({ requireLabels: ["crew"], excludeLabels: ["blocked"] });
+  assert.equal(isExecutable(item({ labels: ["crew"] }), g), true);
+  assert.equal(isExecutable(item({ labels: ["crew", "blocked"] }), g), false);
+});
+
+test("label gate composes with the other executability rules", () => {
+  const g = gated({ requireLabels: ["crew"] });
+  // right label, but wrong state / type / blocked parent still reject
+  assert.equal(isExecutable(item({ labels: ["crew"], stateName: "Backlog" }), g), false);
+  assert.equal(isExecutable(item({ labels: ["crew"], type: "prd" }), g), false);
+  assert.equal(isExecutable(item({ labels: ["crew"], parentApproved: false }), g), false);
+});
+
 test("rankCandidates orders urgent > high > normal > low > none", () => {
   const none = item({ identifier: "BRI-5", priority: 0 });
   const urgent = item({ identifier: "BRI-1", priority: 1 });

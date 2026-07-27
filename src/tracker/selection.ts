@@ -8,14 +8,32 @@ const EXECUTABLE_TYPES: ReadonlySet<ItemType> = new Set<ItemType>([
 ]);
 
 /**
+ * Apply the configured label gate. An empty `requireLabels` means "no
+ * allowlist" rather than "nothing qualifies", so an unconfigured crew claims
+ * everything it did before this gate existed. `excludeLabels` wins over
+ * `requireLabels`: a "blocked" item stays blocked however else it's tagged.
+ */
+export function passesLabelFilter(item: WorkItem, cfg: CrewConfig): boolean {
+  const gate = cfg.tracker.executable;
+  if (!gate) return true;
+  const labels = new Set(item.labels);
+  if (gate.excludeLabels?.some((l) => labels.has(l))) return false;
+  if (gate.requireLabels?.length && !gate.requireLabels.some((l) => labels.has(l))) {
+    return false;
+  }
+  return true;
+}
+
+/**
  * True only when the item is in the configured `ready` state, is of an
- * executable type, and is not blocked by an unapproved parent PRD
- * (parentApproved === false). A null or true parentApproved is OK.
+ * executable type, passes the label gate, and is not blocked by an unapproved
+ * parent PRD (parentApproved === false). A null or true parentApproved is OK.
  */
 export function isExecutable(item: WorkItem, cfg: CrewConfig): boolean {
   if (item.stateName !== cfg.tracker.statuses.ready) return false;
   if (item.type === null || !EXECUTABLE_TYPES.has(item.type)) return false;
   if (item.parentApproved === false) return false;
+  if (!passesLabelFilter(item, cfg)) return false;
   return true;
 }
 

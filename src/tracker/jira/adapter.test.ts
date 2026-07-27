@@ -90,9 +90,9 @@ function fakeFetch(routes: Record<string, unknown>): {
 const auth = { host: "acme.atlassian.net", email: "a@b.c", apiToken: "t" };
 
 /** An adapter with `resolveMeta()` already satisfied, so tests skip discovery. */
-function primed(routes: Record<string, unknown>) {
+function primed(routes: Record<string, unknown>, config: CrewConfig = cfg) {
   const { fetchImpl, calls } = fakeFetch(routes);
-  const adapter = new JiraAdapter(auth, cfg, fetchImpl);
+  const adapter = new JiraAdapter(auth, config, fetchImpl);
   (adapter as unknown as { meta: unknown }).meta = {
     teamId: "BRI",
     myUserId: "acct-1",
@@ -145,6 +145,81 @@ test("transition with no legal path reports what the workflow does allow", async
     () => adapter.transition("BRI-1", "Done"),
     (e: Error) => e.message.includes("Start → In Progress") && e.message.includes('"Todo"'),
   );
+});
+
+// --------------------------- label gate (JQL) ------------------------------
+
+/** cfg plus an executable label gate. */
+function gatedCfg(gate: { requireLabels?: string[]; excludeLabels?: string[] }): CrewConfig {
+  return {
+    ...cfg,
+    tracker: {
+      ...(cfg as unknown as { tracker: Record<string, unknown> }).tracker,
+      executable: { requireLabels: [], excludeLabels: [], ...gate },
+    },
+  } as unknown as CrewConfig;
+}
+
+/** Capture the JQL selectNextExecutable issues, with a stubbed empty result. */
+function captureJql(config: CrewConfig): { adapter: JiraAdapter; jqls: string[] } {
+  const { adapter } = primed({}, config);
+  const jqls: string[] = [];
+  (adapter as unknown as { client: { search: unknown } }).client = {
+    search: async (q: string) => {
+      jqls.push(q);
+      return [];
+    },
+  };
+  return { adapter, jqls };
+}
+
+test("selectNextExecutable adds no label clause when the gate is unset", async () => {
+  const { adapter, jqls } = captureJql(cfg);
+  await adapter.selectNextExecutable();
+  assert.equal(jqls.length, 1);
+  assert.ok(!jqls[0].includes("labels"), jqls[0]);
+});
+
+test("selectNextExecutable pushes requireLabels into the JQL", async () => {
+  const { adapter, jqls } = captureJql(gatedCfg({ requireLabels: ["crew", "agent-ok"] }));
+  await adapter.selectNextExecutable();
+  assert.ok(jqls[0].includes('labels in ("crew", "agent-ok")'), jqls[0]);
+});
+
+test("excludeLabels JQL still matches issues that have no labels at all", async () => {
+  const { adapter, jqls } = captureJql(gatedCfg({ excludeLabels: ["blocked"] }));
+  await adapter.selectNextExecutable();
+  // Bare `labels not in (...)` is false for an unlabeled issue in JQL, which
+  // would wrongly exclude all unlabeled work from an exclude-only config.
+  assert.ok(jqls[0].includes('(labels is EMPTY OR labels not in ("blocked"))'), jqls[0]);
+});
+
+test("label clause sits before ORDER BY and quotes values", async () => {
+  const { adapter, jqls } = captureJql(gatedCfg({ requireLabels: ['we"ird'] }));
+  await adapter.selectNextExecutable();
+  const q = jqls[0];
+  assert.ok(q.indexOf("labels in") < q.indexOf("ORDER BY"), q);
+  assert.ok(q.includes('"we\\"ird"'), q);
+});
+
+test("selectNextExecutable still drops an excluded item the server returned", async () => {
+  // Belt-and-braces: the JQL narrows the page, but isExecutable is the
+  // enforcement point, so a server that ignores the clause changes nothing.
+  const { adapter } = primed({}, gatedCfg({ excludeLabels: ["blocked"] }));
+  (adapter as unknown as { client: { search: unknown } }).client = {
+    search: async () => [
+      {
+        id: "1",
+        key: "BRI-10",
+        fields: {
+          summary: "blocked work",
+          status: { id: "1", name: "Todo" },
+          labels: ["type:task", "blocked"],
+        },
+      },
+    ],
+  };
+  assert.equal(await adapter.selectNextExecutable(), null);
 });
 
 // -------------------------- parent approval gate ---------------------------

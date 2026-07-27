@@ -181,3 +181,67 @@ test("findSimilarOpen ignores an unrelated title", async () => {
   const hits = await adapter.findSimilarOpen("Add dark mode to settings");
   assert.equal(hits.length, 0);
 });
+
+// --------------------------- executable label gate -------------------------
+
+/**
+ * Adapter whose team.issues() records the filter it was handed, so the gate's
+ * server-side narrowing can be asserted without a live Linear.
+ */
+function fakeSelectAdapter(gate?: { requireLabels?: string[]; excludeLabels?: string[] }) {
+  const config = {
+    tracker: {
+      ...(cfg as unknown as { tracker: Record<string, unknown> }).tracker,
+      statuses: { ...(cfg as unknown as { tracker: { statuses: object } }).tracker.statuses, ready: "Todo" },
+      ...(gate ? { executable: { requireLabels: [], excludeLabels: [], ...gate } } : {}),
+    },
+  } as unknown as CrewConfig;
+
+  const filters: Record<string, unknown>[] = [];
+  const adapter = new LinearAdapter("key", config) as unknown as {
+    meta: unknown;
+    team: unknown;
+    selectNextExecutable: LinearAdapter["selectNextExecutable"];
+  };
+  adapter.meta = { teamId: "T", myUserId: "U", labelIds: {}, stateIds: {} };
+  adapter.team = {
+    issues: async ({ filter }: { filter: Record<string, unknown> }) => {
+      filters.push(filter);
+      return { nodes: [] };
+    },
+  };
+  return { adapter, filters };
+}
+
+test("selectNextExecutable sends no label filter when the gate is unset", async () => {
+  const { adapter, filters } = fakeSelectAdapter();
+  await adapter.selectNextExecutable();
+  assert.equal(filters.length, 1);
+  assert.ok(!("and" in filters[0]), "no label clause expected");
+});
+
+test("requireLabels becomes a labels.some name-in filter", async () => {
+  const { adapter, filters } = fakeSelectAdapter({ requireLabels: ["crew", "agent-ok"] });
+  await adapter.selectNextExecutable();
+  const and = filters[0].and as Record<string, any>[];
+  assert.deepEqual(and[0], { labels: { some: { name: { in: ["crew", "agent-ok"] } } } });
+});
+
+test("excludeLabels becomes a labels.every name-nin filter", async () => {
+  // `every` is vacuously true for an unlabeled issue, so exclude-only configs
+  // still see unlabeled work — matching the client-side gate.
+  const { adapter, filters } = fakeSelectAdapter({ excludeLabels: ["blocked"] });
+  await adapter.selectNextExecutable();
+  const and = filters[0].and as Record<string, any>[];
+  assert.deepEqual(and[0], { labels: { every: { name: { nin: ["blocked"] } } } });
+});
+
+test("both lists produce both clauses, alongside the state filter", async () => {
+  const { adapter, filters } = fakeSelectAdapter({
+    requireLabels: ["crew"],
+    excludeLabels: ["blocked"],
+  });
+  await adapter.selectNextExecutable();
+  assert.equal((filters[0].and as unknown[]).length, 2);
+  assert.deepEqual(filters[0].state, { name: { eq: "Todo" } });
+});

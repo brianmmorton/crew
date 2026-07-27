@@ -218,6 +218,16 @@ export interface TrackerConfig {
   };
   /** State names considered "approved" for a parent PRD. */
   approvedStates: string[];
+  /**
+   * Label gating on what the executor may claim out of the ready state. Both
+   * lists empty (the default) means every ready item is executable.
+   */
+  executable: {
+    /** Non-empty = the item must carry at least one of these labels. */
+    requireLabels: string[];
+    /** Any match here blocks the item, even if requireLabels is satisfied. */
+    excludeLabels: string[];
+  };
   /** Non-material proposals go straight to the ready state (default true). */
   autoPromote: boolean;
   /** Jira-only settings; ignored when provider is "linear". */

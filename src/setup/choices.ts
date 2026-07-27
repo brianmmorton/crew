@@ -80,9 +80,9 @@ export function requiredEnvFor(choices: SetupChoices): string[] {
       ? ["JIRA_HOST", "JIRA_EMAIL", "JIRA_API_TOKEN"]
       : ["LINEAR_API_KEY"]),
   );
-  if (choices.forge === "bitbucket") {
-    env.push("BITBUCKET_USERNAME", "BITBUCKET_APP_PASSWORD");
-  }
+  // The access token is the recommended shape; app passwords were removed by
+  // Atlassian on 2026-07-28 and are deliberately not suggested to new users.
+  if (choices.forge === "bitbucket") env.push("BITBUCKET_ACCESS_TOKEN");
   if (choices.agent.provider === "claude") env.push("CLAUDE_CODE_OAUTH_TOKEN");
   return env;
 }

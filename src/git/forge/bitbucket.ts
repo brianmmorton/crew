@@ -14,12 +14,31 @@ import type { ForgePort, OpenPrOptions } from "../../types.js";
  *    rather than mapped onto something that doesn't mean the same thing.
  */
 
+/**
+ * Bitbucket accepts three credential shapes. In preference order:
+ *
+ * 1. `accessToken` — a repository/project/workspace access token, sent as a
+ *    Bearer token. Not tied to a user account, so it's the best fit for a bot.
+ * 2. `email` + `apiToken` — an Atlassian API token with scopes. This is the
+ *    replacement Atlassian points app-password users at.
+ * 3. `username` + `appPassword` — app passwords, which Atlassian removed on
+ *    2026-07-28. Kept only so an existing config fails with a clear message
+ *    rather than an opaque 401.
+ *
+ * Note that 2 and 3 are both HTTP Basic but differ in what goes in the
+ * username field: an account *email* for an API token, a *username* for an app
+ * password. Swapping them is a silent 401, which is why they are distinct
+ * fields here rather than one reused pair.
+ */
 export interface BitbucketAuth {
-  /** App password flow: username + app password. */
+  /** Access token (repository, project, or workspace scope). Preferred. */
+  accessToken?: string;
+  /** Atlassian API token with scopes, paired with the account email. */
+  email?: string;
+  apiToken?: string;
+  /** Legacy app password flow — removed by Atlassian on 2026-07-28. */
   username?: string;
   appPassword?: string;
-  /** Or a workspace/repository/project access token (takes precedence). */
-  accessToken?: string;
 }
 
 const API = "https://api.bitbucket.org/2.0";
@@ -66,10 +85,12 @@ export class BitbucketForge implements ForgePort {
 
   private authHeader(): string {
     if (this.auth.accessToken) return `Bearer ${this.auth.accessToken}`;
-    const basic = Buffer.from(
-      `${this.auth.username ?? ""}:${this.auth.appPassword ?? ""}`,
-    ).toString("base64");
-    return `Basic ${basic}`;
+    // Basic auth for both remaining shapes; only the username half differs.
+    const [user, secret] =
+      this.auth.apiToken !== undefined
+        ? [this.auth.email ?? "", this.auth.apiToken]
+        : [this.auth.username ?? "", this.auth.appPassword ?? ""];
+    return `Basic ${Buffer.from(`${user}:${secret}`).toString("base64")}`;
   }
 
   private async api(

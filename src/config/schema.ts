@@ -36,6 +36,18 @@ export const trackerSchema = z.object({
   approvedStates: z
     .array(z.string())
     .default(["Todo", "In Progress", "In Review", "Done"]),
+  // Narrow what the executor is allowed to claim out of the ready state. Both
+  // lists are empty by default, which means "every ready item is fair game" —
+  // the behaviour before this existed.
+  executable: z
+    .object({
+      // Non-empty = an item must carry at least one of these labels.
+      requireLabels: z.array(z.string()).default([]),
+      // An item carrying any of these is never claimed, even if it also
+      // satisfies requireLabels.
+      excludeLabels: z.array(z.string()).default([]),
+    })
+    .default({}),
   // Non-material proposals go straight to the ready state (executable). Set
   // false to stage them in Backlog for manual promotion instead.
   autoPromote: z.boolean().default(true),

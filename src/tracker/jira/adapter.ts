@@ -180,6 +180,29 @@ export class JiraAdapter implements TrackerPort {
     return parts.join(" AND ");
   }
 
+  /**
+   * JQL for the executable label gate, so an excluded item never occupies a
+   * slot in the `maxResults: PAGE` window. `isExecutable` re-checks the same
+   * rules client-side — this is an optimization, not the enforcement point.
+   *
+   * `labels not in (...)` is deliberately widened with `labels is EMPTY`:
+   * in JQL a `not in` predicate is false for an issue with no labels at all,
+   * which would silently exclude every unlabeled item from an exclude-only
+   * config.
+   */
+  private labelClause(): string {
+    const gate = this.cfg.tracker.executable;
+    const parts: string[] = [];
+    if (gate?.requireLabels?.length) {
+      parts.push(`labels in (${gate.requireLabels.map((l) => jql(l)).join(", ")})`);
+    }
+    if (gate?.excludeLabels?.length) {
+      const list = gate.excludeLabels.map((l) => jql(l)).join(", ");
+      parts.push(`(labels is EMPTY OR labels not in (${list}))`);
+    }
+    return parts.length ? ` AND ${parts.join(" AND ")}` : "";
+  }
+
   // ----------------------------- mapping ----------------------------------
 
   /**
@@ -278,7 +301,8 @@ export class JiraAdapter implements TrackerPort {
     this.ensureMeta();
 
     const issues = await this.client.search(
-      `${this.scope()} AND status = ${jql(this.cfg.tracker.statuses.ready)} ORDER BY priority DESC, created ASC`,
+      `${this.scope()} AND status = ${jql(this.cfg.tracker.statuses.ready)}` +
+        `${this.labelClause()} ORDER BY priority DESC, created ASC`,
       { maxResults: PAGE },
     );
 

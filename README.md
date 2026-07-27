@@ -51,12 +51,50 @@ config. Run `crew doctor` anytime to check the ones you chose.
 
 ## Install
 
+Install globally and `crew` is on your `PATH` — nothing to add to your shell:
+
 ```bash
-git clone <this-repo> crew && cd crew
+npm install -g @brianmorton/crew
+# or: pnpm add -g @brianmorton/crew
+# or: yarn global add @brianmorton/crew
+
+crew --version
+```
+
+Prefer to pin it per project? Install it as a dev dependency and run it through
+your package manager, which puts `node_modules/.bin` on `PATH` for you:
+
+```bash
+npm install -D @brianmorton/crew
+npx crew status                  # npm
+pnpm exec crew status            # pnpm (`pnpm crew status` also works)
+```
+
+Inside `package.json` scripts, `crew` resolves on its own:
+
+```json
+{ "scripts": { "crew": "crew run" } }
+```
+
+You never need to type `./node_modules/.bin/crew`.
+
+<details>
+<summary>Working on crew itself</summary>
+
+```bash
+git clone https://github.com/brianmmorton/crew && cd crew
 npm install
 npm run build
-npm link          # puts `crew` on your PATH
+npm link          # symlinks your checkout onto your PATH as `crew`
+npm test
 ```
+
+`npm run dev` rebuilds on change. To undo the link later: `npm unlink -g @brianmorton/crew`.
+</details>
+
+> **pnpm users:** `pnpm add -g` needs a global bin directory. If you see
+> `ERR_PNPM_NO_GLOBAL_BIN_DIR`, run `pnpm setup` once (it adds the directory to
+> your shell profile), restart your shell, and retry.
 
 ## Quick start
 
@@ -76,10 +114,11 @@ git add .crew && git commit -m "chore: add crew config"
 #   JIRA_EMAIL               the account the token belongs to
 #   JIRA_API_TOKEN           id.atlassian.com → Security → API tokens
 # Code host — GitHub: nothing here; run `gh auth login`
-# Code host — Bitbucket Cloud:
-#   BITBUCKET_ACCESS_TOKEN   or the username/password pair below
-#   BITBUCKET_USERNAME       your username (not your email)
-#   BITBUCKET_APP_PASSWORD   Personal settings → App passwords ("Pull requests: Write")
+# Code host — Bitbucket Cloud (app passwords stopped working 28 Jul 2026):
+#   BITBUCKET_ACCESS_TOKEN   Repository settings → Access tokens
+#                            scopes: pullrequest:write, repository:write
+#   ...or an Atlassian API token, with your account email:
+#   BITBUCKET_EMAIL / BITBUCKET_API_TOKEN   (see "Using Bitbucket" for scopes)
 # Agent:
 #   CLAUDE_CODE_OAUTH_TOKEN  for the Claude provider: run `claude setup-token`
 #                            (other CLIs use their own auth)
@@ -122,6 +161,33 @@ status changes go through workflow **transitions**, so a status is only reachabl
 if your workflow has a path to it from where the issue sits; and descriptions are
 converted to Atlassian Document Format, so markdown renders as plain text.
 
+#### Permissions
+
+A Jira API token has **no scopes of its own** — it inherits every permission of
+the Atlassian account that created it. A token made from an admin account *is*
+an admin token. So create one from a dedicated service account granted only
+these project permissions:
+
+| Permission | Why crew needs it |
+|---|---|
+| Browse Projects | Read the board — required by every other operation |
+| Create Issues | File proposals |
+| Edit Issues | Update fields on existing work |
+| Transition Issues | Move items between statuses |
+| Assign Issues | Assign work to itself |
+| Add Comments | Post PR links and review notes |
+| Link Issues | Link PRDs to the work they spawn |
+
+The service account also needs **Assignable User** in the project — a separate
+permission from *Assign Issues*, held by the person being assigned rather than
+the one doing the assigning. Without it, assignment fails.
+
+Two more things that bite in practice: Jira API tokens **expire** (one year by
+default), and a lapsed one fails as a hard `401`. And JQL search filters by
+permission rather than rejecting — an account missing *Browse Projects* gets an
+empty result set with HTTP 200, which looks like an empty backlog rather than an
+error.
+
 If your config still uses the older `linear:` block, it keeps working as-is —
 it's read as `tracker:` with `provider: linear`.
 
@@ -138,20 +204,43 @@ repo:
   # bitbucketRepo: "my-workspace/my-repo"   # omit to infer from the origin remote
 ```
 
-Then put credentials in `.crew/.env` — either an access token (workspace,
-project, or repository scope):
+Then put credentials in `.crew/.env`. Two options — a **Repository Access
+Token** is recommended, since it isn't tied to anyone's personal account:
 
 ```bash
 BITBUCKET_ACCESS_TOKEN=...
 ```
 
-...or a username + app password with the **Pull requests: Write** scope, from
-*Personal settings → App passwords*:
+Create it under *Repository settings → Access tokens* with these scopes:
+
+| Scope | Why crew needs it |
+|---|---|
+| `pullrequest:write` | Open PRs and comment on them |
+| `repository:write` | Push the branch — omit if you push over SSH |
+
+Or use an **Atlassian API token with scopes**, paired with your account
+**email** (not your username), from *id.atlassian.com → Security → API tokens*:
 
 ```bash
-BITBUCKET_USERNAME=your-username     # your username, not your email
-BITBUCKET_APP_PASSWORD=...
+BITBUCKET_EMAIL=you@example.com
+BITBUCKET_API_TOKEN=...
 ```
+
+| Scope | Why crew needs it |
+|---|---|
+| `write:pullrequest:bitbucket` | Open pull requests |
+| `read:pullrequest:bitbucket` | Comment on pull requests |
+| `read:repository:bitbucket` | Read the repository |
+| `write:repository:bitbucket` | Push the branch — omit if you push over SSH |
+
+> Bitbucket API token scopes **do not imply one another** — unlike the older
+> OAuth scopes, `write:pullrequest:bitbucket` does *not* grant read access.
+> Tick all four explicitly.
+
+> **App passwords no longer work.** Atlassian removed them on **28 July 2026**.
+> If you have `BITBUCKET_USERNAME` / `BITBUCKET_APP_PASSWORD` in your `.env`,
+> requests will fail with `401` — switch to one of the options above. crew warns
+> at startup when it sees them.
 
 crew talks to the Bitbucket Cloud REST API directly, so there's no CLI to
 install. Two differences from GitHub are worth knowing: Bitbucket pull requests
@@ -196,8 +285,10 @@ of `config.yaml`:
 - **tracker** — `provider` (`linear` or `jira`), `team` (a Linear team name or a
   Jira project key), an optional `project` to scope this repo (a Linear project
   or a Jira component), workflow state names, `autoPromote` (non-material
-  proposals go straight to ready), and a `jira` block for Jira-specific issue
-  types and priorities. The older `linear:` spelling is still accepted.
+  proposals go straight to ready), `executable.requireLabels` /
+  `executable.excludeLabels` (label gate on what the executor may claim — see
+  below), and a `jira` block for Jira-specific issue types and priorities. The
+  older `linear:` spelling is still accepted.
 - **personas** — your agents; see below.
 
 The `.crew/` directory name can be overridden with the `CREW_DIR` env var.
@@ -268,6 +359,32 @@ An executor claims work by label. Give it `claims: ["type:docs"]` and any ready
 item carrying that label routes to it instead of the implementer; everything
 unclaimed still goes to the implementer, so adding one never strands work. One
 agent runs at a time under the existing `wipCap`.
+
+Note that `claims` is *routing*, not filtering: it decides which executor works
+an item that was already selected, so an item labelled for an executor you never
+defined still gets worked, by the implementer.
+
+### Filtering what the executor picks up
+
+To control which ready items are eligible at all, use the tracker-level label
+gate. Both lists default to empty, which means every ready item is fair game:
+
+```yaml
+tracker:
+  executable:
+    requireLabels: ["crew"]      # only work items carrying one of these
+    excludeLabels: ["blocked"]   # never work items carrying one of these
+```
+
+`requireLabels` is an opt-in allowlist — useful on a board you share with
+people, where crew should only touch work explicitly marked for it. Items with
+none of these labels are skipped, including unlabeled ones. `excludeLabels` is a
+denylist that leaves everything else (unlabeled work included) eligible, and it
+wins on conflict: an item tagged both `crew` and `blocked` is not worked.
+
+The gate applies to Linear and Jira alike, and is pushed into the tracker query
+so excluded items don't crowd out real work in the page crew fetches. It gates
+selection only — an item already in progress is unaffected by a label change.
 
 ### Reviewers
 
