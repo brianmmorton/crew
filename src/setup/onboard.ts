@@ -5,6 +5,7 @@ import { join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CrewConfig, ForgeProvider } from "../types.js";
 import { ensureGitignored } from "../util/gitignore.js";
+import { inspectRepo, type RepoFacts } from "../git/discover.js";
 import { loadEnvFiles } from "../util/env.js";
 import {
   AGENT_PRESETS,
@@ -50,11 +51,22 @@ async function ask(
   return (await rl.question(question)).trim();
 }
 
-/** Interactively pick the tracker, code host, and agent CLI for this repo. */
-export async function promptForChoices(): Promise<SetupChoices> {
+/**
+ * Interactively pick the tracker, code host, and agent CLI for this repo.
+ *
+ * `facts` are whatever git already told us about the checkout. Anything in
+ * there is presented as a detected default rather than asked from scratch —
+ * the origin remote knows the code host better than the person typing.
+ */
+export async function promptForChoices(facts: RepoFacts = {}): Promise<SetupChoices> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
     console.log("Let's pick the tools this project should use.");
+    if (facts.root) {
+      console.log(`\nDetected repo:   ${facts.root}`);
+      if (facts.baseBranch) console.log(`Detected base:   ${facts.baseBranch}`);
+      if (facts.originUrl) console.log(`Detected origin: ${facts.originUrl}`);
+    }
 
     const trackers: TrackerProvider[] = ["linear", "jira"];
     const t = await choose(rl, "Which issue tracker do you use?", [
@@ -63,18 +75,30 @@ export async function promptForChoices(): Promise<SetupChoices> {
     ]);
 
     const forges: ForgeProvider[] = ["github", "bitbucket"];
-    const f = await choose(rl, "Where do your pull requests go?", [
-      "GitHub (via the gh CLI)",
-      "Bitbucket Cloud (via the REST API)",
-    ]);
+    // Preselect what the remote says; the question stays so a repo whose PRs
+    // live somewhere other than its origin can still be corrected.
+    const detectedForge = facts.forge ? forges.indexOf(facts.forge) : 0;
+    const f = await choose(
+      rl,
+      facts.forge
+        ? `Where do your pull requests go? (detected ${facts.forge} from your origin remote)`
+        : "Where do your pull requests go?",
+      ["GitHub (via the gh CLI)", "Bitbucket Cloud (via the REST API)"],
+      detectedForge,
+    );
 
     let bitbucketRepo: string | undefined;
     if (forges[f] === "bitbucket") {
-      const answer = await ask(
-        rl,
-        'Bitbucket repo as "workspace/repo-slug" (blank = infer from your origin remote): ',
-      );
-      if (answer) bitbucketRepo = answer;
+      // Only worth asking when the remote didn't already yield the slug.
+      if (facts.bitbucketRepo && forges[f] === facts.forge) {
+        console.log(`  → using ${facts.bitbucketRepo} (from your origin remote)`);
+      } else {
+        const answer = await ask(
+          rl,
+          'Bitbucket repo as "workspace/repo-slug" (blank = infer from your origin remote): ',
+        );
+        if (answer) bitbucketRepo = answer;
+      }
     }
 
     const a = await choose(
@@ -92,7 +116,13 @@ export async function promptForChoices(): Promise<SetupChoices> {
       agent = { ...preset, provider, command };
     }
 
-    return { tracker: trackers[t], forge: forges[f], agent, bitbucketRepo };
+    return {
+      tracker: trackers[t],
+      forge: forges[f],
+      agent,
+      bitbucketRepo,
+      baseBranch: facts.baseBranch,
+    };
   } finally {
     rl.close();
   }
@@ -118,7 +148,7 @@ export function writeChoices(cfg: CrewConfig, choices: SetupChoices): boolean {
  * .gitignore.
  */
 export async function runSetup(cfg: CrewConfig): Promise<void> {
-  const choices = await promptForChoices();
+  const choices = await promptForChoices(inspectRepo(cfg.repo.path));
   writeChoices(cfg, choices);
   console.log(
     `\nRecorded: tracker=${choices.tracker}, forge=${choices.forge}, ` +

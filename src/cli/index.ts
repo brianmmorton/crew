@@ -3,7 +3,8 @@ import { Command } from "commander";
 import { fileURLToPath } from "node:url";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { loadConfig, crewDirName } from "../config/load.js";
+import { loadConfig, crewDirName, crewRepoOverride } from "../config/load.js";
+import { inspectRepo } from "../git/discover.js";
 import { buildPorts } from "../engine/ports.js";
 import { implementerCycle, proposerCycle } from "../engine/cycles.js";
 import { runSupervised } from "../engine/supervisor.js";
@@ -91,7 +92,18 @@ const program = new Command();
 program
   .name("crew")
   .description("Autonomous agent team: propose typed work into Linear or Jira, gate material changes behind human-approved PRDs, drain approved work into PRs.")
-  .version(packageVersion());
+  .version(packageVersion())
+  .option(
+    "-C, --repo <path>",
+    "run against the repo at <path> instead of the current directory (also: CREW_REPO)",
+  )
+  .hook("preAction", (thisCommand) => {
+    // Commander parses global options into the root command, so translating the
+    // flag into CREW_REPO here means every subcommand's bare `loadConfig()`
+    // picks it up without threading an argument through each action.
+    const repo = thisCommand.opts().repo as string | undefined;
+    if (repo) process.env.CREW_REPO = repo;
+  });
 
 /** Recursively copy template tree into dest, never overwriting existing files. */
 function copyNoOverwrite(src: string, dest: string): string[] {
@@ -112,12 +124,33 @@ function copyNoOverwrite(src: string, dest: string): string[] {
 
 const TEMPLATES = () => fileURLToPath(new URL("../../templates/agents", import.meta.url));
 
+/**
+ * Where `init`/`setup` should scaffold the crew dir. Unlike every other
+ * command these run before a config exists, so they can't use loadConfig's
+ * upward search — they anchor on the git root instead, which keeps
+ * `crew init` from writing a stray .crew/ into a subdirectory.
+ */
+function scaffoldTarget(): string {
+  const explicit = crewRepoOverride();
+  const start = explicit ?? process.cwd();
+  const facts = inspectRepo(start);
+  if (!facts.root) {
+    console.error(
+      `${start} is not a git repository. crew needs one to create worktrees ` +
+        `and open pull requests — run \`git init\` (or cd into your repo) first.`,
+    );
+    process.exit(1);
+  }
+  return facts.root;
+}
+
 program
   .command("init")
   .description("Scaffold generic crew config (default .crew/) into the current repo")
   .action(() => {
     const dir = crewDirName();
-    const dest = join(process.cwd(), dir);
+    const target = scaffoldTarget();
+    const dest = join(target, dir);
     const written = copyNoOverwrite(TEMPLATES(), dest);
     if (written.length === 0) {
       console.log(`${dir}/ already present — nothing overwritten.`);
@@ -125,7 +158,7 @@ program
       console.log(`Scaffolded generic ${dir}/ templates:`);
       for (const w of written) console.log("  " + w);
     }
-    ensureGitignored(process.cwd(), `${dir}/.env`);
+    ensureGitignored(target, `${dir}/.env`);
     console.log(
       "\nThe templates are generic. Recommended next step:\n" +
         "  crew setup        # an agent tailors the personas/constitution/config to THIS repo,\n" +
@@ -140,12 +173,13 @@ program
   .description("Onboard this repo: an agent tailors the crew config to your project, then sets up .env + .gitignore")
   .action(async () => {
     const dir = crewDirName();
-    const dest = join(process.cwd(), dir);
+    const target = scaffoldTarget();
+    const dest = join(target, dir);
     if (!existsSync(join(dest, "config.yaml"))) {
       copyNoOverwrite(TEMPLATES(), dest);
       console.log(`Scaffolded generic ${dir}/ templates first.\n`);
     }
-    const cfg = loadConfig();
+    const cfg = loadConfig(target);
     await runSetup(cfg);
     console.log("\nChecking prerequisites:");
     await runDoctor(cfg, logger);

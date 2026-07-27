@@ -70,6 +70,11 @@ export interface SetupChoices {
   agent: AgentPreset;
   /** Bitbucket only, and only when the user typed one. */
   bitbucketRepo?: string;
+  /**
+   * Default branch detected from `origin/HEAD`. Written into config.yaml so the
+   * file states the real branch rather than the template's `main` guess.
+   */
+  baseBranch?: string;
 }
 
 /** Env var names the chosen providers require, for the setup summary. */
@@ -115,6 +120,16 @@ export function applyChoices(yaml: string, choices: SetupChoices): string {
         `  promptVia: "${choices.agent.promptVia ?? "stdin"}"\n` +
         (choices.agent.modelFlag ? `  modelFlag: "${choices.agent.modelFlag}"\n` : "");
   out = out.replace(/^agent:\s*\n(?:[^\S\n]+[^\n]*\n)*/m, agentBlock);
+
+  // repo.baseBranch — the template ships `main`; replace it with whatever
+  // origin/HEAD actually points at, so the file is accurate on a repo whose
+  // default branch is master/trunk/develop.
+  if (choices.baseBranch) {
+    out = out.replace(
+      /^([^\S\n]+baseBranch:[^\S\n]*)("?)[^"\n]*\2[^\S\n]*$/m,
+      `$1${choices.baseBranch}`,
+    );
+  }
 
   // repo.forge — rewrite the template's existing line rather than adding a
   // second one, which would make the file a duplicate-key YAML error.

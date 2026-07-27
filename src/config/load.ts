@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve, join, isAbsolute } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { configSchema } from "./schema.js";
+import { findConfigRoot, inspectRepo, isGitRepo } from "../git/discover.js";
 import type { CrewConfig } from "../types.js";
 
 export class ConfigError extends Error {}
@@ -17,18 +18,36 @@ export function crewDirName(): string {
 }
 
 /**
- * Load and validate <crewDir>/config.yaml from a target repo, resolving absolute
- * paths. `startDir` is the repo root (or any dir containing the crew dir).
+ * The repo crew should operate on, when the caller wants to override discovery.
+ * `CREW_REPO` lets you drive a sibling repo without cd-ing into it, which is
+ * the point of keeping several related repos in one directory.
  */
-export function loadConfig(startDir = process.cwd()): CrewConfig {
+export function crewRepoOverride(): string | undefined {
+  const v = process.env.CREW_REPO?.trim();
+  return v && v.length > 0 ? resolve(v) : undefined;
+}
+
+/**
+ * Load and validate <crewDir>/config.yaml from a target repo, resolving absolute
+ * paths.
+ *
+ * `startDir` may be the repo root or any directory inside it: the crew dir is
+ * found by walking up, the way git and npm locate their own roots. Fields the
+ * config leaves at their defaults are filled in from git — the repo path, the
+ * base branch, and the code host are all facts about the checkout, so reading
+ * them beats asking for them.
+ */
+export function loadConfig(startDir = crewRepoOverride() ?? process.cwd()): CrewConfig {
   const dirName = crewDirName();
-  const configDir = resolve(startDir, dirName);
-  const configPath = join(configDir, "config.yaml");
-  if (!existsSync(configPath)) {
+  const configRoot = findConfigRoot(startDir, dirName);
+  if (!configRoot) {
     throw new ConfigError(
-      `No ${dirName}/config.yaml found under ${startDir}. Run \`crew setup\` (or \`crew init\`) first.`,
+      `No ${dirName}/config.yaml found in ${startDir} or any parent directory. ` +
+        `Run \`crew setup\` (or \`crew init\`) first.`,
     );
   }
+  const configDir = join(configRoot, dirName);
+  const configPath = join(configDir, "config.yaml");
 
   let parsed: unknown;
   try {
@@ -48,9 +67,52 @@ export function loadConfig(startDir = process.cwd()): CrewConfig {
   }
 
   const raw = result.data;
-  const repoPath = isAbsolute(raw.repo.path)
+  // An explicit non-default path always wins; `"."` is the schema default and
+  // means "wherever the config dir lives", so git decides the real root there.
+  const explicitPath = raw.repo.path !== ".";
+  const declaredPath = isAbsolute(raw.repo.path)
     ? raw.repo.path
-    : resolve(startDir, raw.repo.path);
+    : resolve(configRoot, raw.repo.path);
+
+  const facts = inspectRepo(declaredPath);
+  const repoPath = !explicitPath && facts.root ? facts.root : declaredPath;
+
+  // Fail here rather than several minutes into a cycle, where the same mistake
+  // surfaces as an opaque `git fetch` error from inside a worktree operation.
+  if (!existsSync(repoPath)) {
+    throw new ConfigError(
+      `repo.path in ${configPath} points at ${repoPath}, which does not exist.`,
+    );
+  }
+  if (!isGitRepo(repoPath)) {
+    throw new ConfigError(
+      `repo.path in ${configPath} points at ${repoPath}, which is not a git ` +
+        `repository. crew needs one to create worktrees and open pull requests.`,
+    );
+  }
+  // A config dir belonging to one repo but pointing at another is almost always
+  // a copy-paste slip, and it silently files work against the wrong codebase.
+  if (explicitPath && facts.root && facts.root !== repoPath) {
+    throw new ConfigError(
+      `repo.path in ${configPath} points at ${repoPath}, which is inside the ` +
+        `git repository at ${facts.root} rather than being its root. ` +
+        `Set repo.path to the repository root.`,
+    );
+  }
+
+  const inferred = explicitPath ? inspectRepo(repoPath) : facts;
+  // Each of these is only inferred when the config left the schema default in
+  // place, so anything written by hand always wins.
+  const baseBranch =
+    raw.repo.baseBranch === "main" && inferred.baseBranch
+      ? inferred.baseBranch
+      : raw.repo.baseBranch;
+  const forge =
+    raw.repo.forge === "github" && inferred.forge ? inferred.forge : raw.repo.forge;
+  const bitbucketRepo =
+    forge === "bitbucket"
+      ? (raw.repo.bitbucketRepo ?? inferred.bitbucketRepo)
+      : raw.repo.bitbucketRepo;
 
   const constitutionPath = join(configDir, "constitution.md");
   if (!existsSync(constitutionPath)) {
@@ -83,7 +145,7 @@ export function loadConfig(startDir = process.cwd()): CrewConfig {
   return {
     ...rest,
     tracker,
-    repo: { ...raw.repo, path: repoPath },
+    repo: { ...raw.repo, path: repoPath, baseBranch, forge, bitbucketRepo },
     configDir,
     constitutionPath,
   };

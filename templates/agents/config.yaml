@@ -4,10 +4,14 @@
 project: ""                    # your project name
 
 repo:
-  path: "."                    # repo root, relative to this .crew/ parent
+  # Left at ".", crew uses the git toplevel containing this .crew/ directory, so
+  # commands work from any subdirectory. Set an explicit path to point at
+  # another checkout; it must be that repo's root.
+  path: "."
+  # Detected from origin/HEAD at setup. Edit if you target another branch.
   baseBranch: main
 
-  # Where pull requests are opened:
+  # Where pull requests are opened. Detected from your origin remote at setup:
   #   github     — uses the `gh` CLI, which carries its own auth (gh auth login)
   #   bitbucket  — uses the Bitbucket Cloud REST API; needs either
   #                BITBUCKET_ACCESS_TOKEN, or BITBUCKET_USERNAME +
