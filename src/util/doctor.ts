@@ -4,6 +4,7 @@ import type { CrewConfig, Logger, TrackerPort } from "../types.js";
 import { loadEnvFiles } from "./env.js";
 import { REQUIRED_ENV } from "../tracker/factory.js";
 import { FORGE_ENV, forgeCredentialsPresent, forgeEnvHint } from "../git/forge/factory.js";
+import { referencedVars, validateMcpServers } from "../config/mcp.js";
 
 const pExecFile = promisify(execFile);
 
@@ -113,6 +114,33 @@ export async function runDoctor(
     });
   }
 
+  // MCP: every credential a *granted* server needs. Ungranted servers are
+  // skipped — defining one you haven't handed to any agent is not a problem.
+  const servers = cfg.mcpServers ?? {};
+  const granted = new Set(Object.values(cfg.personas ?? {}).flatMap((p) => p.mcp ?? []));
+  for (const name of [...granted].sort()) {
+    const def = servers[name];
+    if (!def) continue;
+    for (const v of referencedVars(def)) {
+      checks.push({
+        name: v,
+        ok: !!process.env[v]?.trim(),
+        // Not soft: a granted server with no credential skips that agent's run
+        // entirely, so it is a real broken configuration, not a nicety.
+        detail: process.env[v]?.trim() ? "set" : `missing (mcpServers.${name})`,
+        hint: `add to ${cfg.configDir}/.env`,
+      });
+    }
+  }
+  // Advisory config smells — a literal secret in the committed file, or a tool
+  // grant that could write to the tracker.
+  let mcpWarnings: string[] = [];
+  try {
+    mcpWarnings = validateMcpServers(servers);
+  } catch {
+    // Structural errors already fail loadConfig; nothing useful to add here.
+  }
+
   let allOk = true;
   for (const c of checks) {
     const hard = !c.soft;
@@ -124,6 +152,11 @@ export async function runDoctor(
       const hintStr = !c.ok && c.hint ? `  → ${c.hint}` : "";
       console.log(`  ${mark} ${c.name.padEnd(24)} ${c.detail}${hintStr}`);
     }
+  }
+  // Advisory, so they print regardless of allOk and never fail the command.
+  for (const w of mcpWarnings) {
+    if (quiet) logger.warn(w);
+    else console.log(`  ⚠ ${w}`);
   }
   if (!quiet) {
     console.log(allOk ? "\nAll prerequisites satisfied." : "\nMissing prerequisites above — fix the ✗ items.");

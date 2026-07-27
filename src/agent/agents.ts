@@ -86,6 +86,7 @@ function toPersonaConfig(raw: Record<string, unknown>, where: string): PersonaCo
   out.label = str(raw.label);
   out.claims = strArr(raw.claims);
   out.canTransitionTo = strArr(raw.canTransitionTo);
+  out.mcp = strArr(raw.mcp);
 
   if (raw.allowedTypes !== undefined) {
     const types = strArr(raw.allowedTypes) ?? [];
@@ -143,6 +144,7 @@ export function loadAgents(cfg: CrewConfig): AgentDef[] {
   const dir = personasDir(cfg);
   const names = discoverPersonaFiles(cfg);
   const agents: AgentDef[] = [];
+  const knownServers = Object.keys(cfg.mcpServers ?? {});
 
   for (const name of names) {
     const file = join(dir, `${name}.md`);
@@ -155,6 +157,18 @@ export function loadAgents(cfg: CrewConfig): AgentDef[] {
     const m = merge(fromFile, fromConfig);
     const builtin = (BUILTIN_PERSONAS as readonly string[]).includes(name);
     const kind = m.kind ?? BUILTIN_KINDS[name] ?? "proposer";
+
+    // Checked on the MERGED value, so a grant typed into frontmatter is caught
+    // as loudly as one in config.yaml. Left unchecked it fails open — the run
+    // proceeds, files nothing, and repeats every cadence with no obvious cause.
+    for (const server of m.mcp ?? []) {
+      if (!knownServers.includes(server)) {
+        throw new AgentError(
+          `personas/${name}.md: unknown MCP server "${server}" — define it under ` +
+            `\`mcpServers:\` in config.yaml (known: ${knownServers.join(", ") || "none"})`,
+        );
+      }
+    }
 
     agents.push({
       name,
@@ -170,6 +184,7 @@ export function loadAgents(cfg: CrewConfig): AgentDef[] {
       label: m.label,
       claims: m.claims,
       canTransitionTo: m.canTransitionTo,
+      mcp: m.mcp,
     });
   }
 

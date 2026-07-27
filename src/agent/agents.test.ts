@@ -21,13 +21,14 @@ import type { AgentDef, CrewConfig, PersonaConfig } from "../types.js";
 function fixture(
   files: Record<string, string>,
   personas: Record<string, PersonaConfig> = {},
+  mcpServers: Record<string, unknown> = {},
 ): CrewConfig {
   const dir = mkdtempSync(join(tmpdir(), "crew-agents-"));
   mkdirSync(join(dir, "personas"), { recursive: true });
   for (const [name, body] of Object.entries(files)) {
     writeFileSync(join(dir, "personas", `${name}.md`), body, "utf8");
   }
-  return { configDir: dir, personas } as unknown as CrewConfig;
+  return { configDir: dir, personas, mcpServers } as unknown as CrewConfig;
 }
 
 // ----------------------------- frontmatter ---------------------------------
@@ -133,6 +134,57 @@ test("an undefined field in config.yaml does not clobber frontmatter", () => {
   const [a] = loadAgents(cfg);
   assert.equal(a.model, "haiku");
   assert.equal(a.cadence, "0 9 * * 1");
+});
+
+// ----------------------------- mcp grants ----------------------------------
+
+test("a persona with no mcp key is granted no tools", () => {
+  // The default is deliberate: tools are never inherited from the user's global
+  // agent config, so a run's capabilities depend only on crew's own config.
+  const [a] = loadAgents(fixture({ qa: "body\n" }));
+  assert.equal(a.mcp, undefined);
+});
+
+const SERVERS = { sentry: { command: "npx" }, posthog: { command: "npx" } };
+
+test("mcp grants are read from frontmatter", () => {
+  const cfg = fixture({ qa: "---\nmcp: [sentry, posthog]\n---\nbody\n" }, {}, SERVERS);
+  const [a] = loadAgents(cfg);
+  assert.deepEqual(a.mcp, ["sentry", "posthog"]);
+});
+
+test("config.yaml mcp grants override frontmatter", () => {
+  const cfg = fixture({ qa: "---\nmcp: [sentry]\n---\nbody\n" }, { qa: { mcp: ["posthog"] } }, SERVERS);
+  const [a] = loadAgents(cfg);
+  assert.deepEqual(a.mcp, ["posthog"]);
+});
+
+test("config.yaml can revoke a frontmatter grant with an empty list", () => {
+  // Distinct from omitting the key: an explicit [] is how a project turns off a
+  // shared persona file's tools without editing that file.
+  const cfg = fixture({ qa: "---\nmcp: [sentry]\n---\nbody\n" }, { qa: { mcp: [] } }, SERVERS);
+  const [a] = loadAgents(cfg);
+  assert.deepEqual(a.mcp, []);
+});
+
+test("a frontmatter grant naming an undefined server is a loud error", () => {
+  // Regression: validating only config.yaml missed this, so a typo failed open —
+  // the agent ran, filed nothing, and repeated on every cadence with no cause
+  // visible anywhere.
+  const cfg = fixture({ qa: "---\nmcp: [sentr]\n---\nbody\n" }, {}, SERVERS);
+  assert.throws(() => loadAgents(cfg), AgentError);
+});
+
+test("a config.yaml grant naming an undefined server is a loud error", () => {
+  const cfg = fixture({ qa: "body\n" }, { qa: { mcp: ["nope"] } }, SERVERS);
+  assert.throws(() => loadAgents(cfg), AgentError);
+});
+
+test("a grant revoked in config.yaml is not validated against the bad frontmatter name", () => {
+  // The check runs on the merged value, so overriding a stale grant fixes it
+  // without editing the shared persona file.
+  const cfg = fixture({ qa: "---\nmcp: [gone]\n---\nbody\n" }, { qa: { mcp: [] } }, SERVERS);
+  assert.doesNotThrow(() => loadAgents(cfg));
 });
 
 // ----------------------------- validation ----------------------------------

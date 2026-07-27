@@ -31,8 +31,47 @@ repo:
 #     args: ["exec"]              # base args before the prompt
 #     promptVia: "stdin"          # "stdin" (piped) or "arg" (appended)
 #     modelFlag: "--model"        # how to pass the model (omit if the CLI has none)
+#     mcpConfigFlag: "--mcp-config"      # how it takes an MCP config file
+#     mcpStrictFlag: "--strict-mcp-config"  # confine it to that file (if supported)
 agent:
   provider: "claude"
+
+# --- External tools (MCP) ----------------------------------------------------
+# Servers your agents can be granted, to give them context they can't get from
+# the repo alone: production errors, analytics, a docs index. Grant them per
+# persona below with `mcp: [name]` — an agent with no `mcp:` key gets NO tools,
+# and never inherits the servers you've configured in Claude Code or Codex
+# yourself. That keeps a run reproducible on anyone else's machine.
+#
+# SECRETS: this file is committed, so never paste a key here. Write ${VAR} and
+# put the value in .env or ~/.crew/env (see .env.example). crew resolves it at
+# spawn time into a temporary file outside the repo and deletes it after the run.
+# A missing variable skips the run with a message naming it, rather than letting
+# the agent burn a cycle failing to authenticate.
+#
+# Grant READ-ONLY servers, with READ-ONLY tokens. crew's whole model is that
+# agents *propose* and the engine files — a server that can create issues
+# bypasses dedup, allowedTypes, maxProposals, and the PRD approval gate.
+# `crew doctor` warns if you grant one, but the token scope is what stops it:
+# headless runs skip the permission system, so `allowedTools` below is advisory
+# (crew puts it in the prompt), NOT an enforced boundary.
+mcpServers: {}
+  # sentry:
+  #   command: "npx"
+  #   args: ["-y", "@sentry/mcp-server@latest"]
+  #   env:
+  #     SENTRY_AUTH_TOKEN: "${SENTRY_AUTH_TOKEN}"
+  #   # Advisory: tells the agent which tools to use. Bare names are namespaced
+  #   # to mcp__sentry__<tool>. Omit to leave every tool available.
+  #   allowedTools: ["find_errors", "get_issue_details"]
+  #   description: "Production errors, so QA files what's actually breaking"
+  #
+  # An HTTP server instead of a local process:
+  # analytics:
+  #   url: "https://mcp.example.com/sse"
+  #   type: "sse"
+  #   headers:
+  #     Authorization: "Bearer ${ANALYTICS_TOKEN}"
 
 # --- Issue tracker -----------------------------------------------------------
 # Where crew files work and reads it back. `provider` picks the adapter:
@@ -156,7 +195,7 @@ models:
 #   reviewer  runs after a PR opens; comments and (if allowed) moves the issue
 #
 # The built-ins default to the right kind, so they need only a cadence.
-# Options every agent may set: model, description.
+# Options every agent may set: model, description, mcp (see mcpServers above).
 # Proposers/reviewers also: allowedTypes, maxProposals, label.
 # Executors also: claims. Reviewers also: canTransitionTo.
 personas:
@@ -188,6 +227,13 @@ personas:
   #   kind: reviewer
   #   model: opus
   #   canTransitionTo: ["Todo"]
+  #
+  # Granting external tools: this QA agent can read production errors, so it
+  # files the bugs that are actually firing instead of the ones it imagines.
+  # Names must match keys under `mcpServers:` above.
+  # qa:
+  #   cadence: "0 */6 * * *"
+  #   mcp: [sentry]
 
 triager:
   cadence: "0 * * * *"

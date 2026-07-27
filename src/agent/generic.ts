@@ -25,6 +25,21 @@ export function runGeneric(agent: AgentCfg, opts: RunPersonaOptions): Promise<Pe
 
     const args = [...agent.args];
     if (agent.modelFlag && opts.model) args.push(agent.modelFlag, opts.model);
+    // MCP support varies by CLI, so it is opt-in via `agent.mcpConfigFlag`. A
+    // persona granted servers on a CLI that can't take them runs WITHOUT them
+    // rather than failing the cycle — consistent with the rest of the runner,
+    // and the warning tells the user why the tools never showed up.
+    if (opts.mcpConfigPath) {
+      if (agent.mcpConfigFlag) {
+        args.push(agent.mcpConfigFlag, opts.mcpConfigPath);
+        if (agent.mcpStrictFlag) args.push(agent.mcpStrictFlag);
+      } else if (opts.onActivity) {
+        opts.onActivity(
+          `[crew] persona was granted MCP servers, but agent.mcpConfigFlag is not set ` +
+            `for provider "${agent.provider}" — running without them`,
+        );
+      }
+    }
     if (agent.promptVia === "arg") args.push(opts.prompt);
 
     const child = spawn(agent.command, args, {

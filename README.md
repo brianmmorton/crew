@@ -348,6 +348,7 @@ You are the accessibility agent. Audit for…
 | `label` | proposers, reviewers | Extra tracker label on everything it files |
 | `claims` | executors | Item labels that route work to this agent |
 | `canTransitionTo` | reviewers | Workflow states it may move an issue to |
+| `mcp` | all | External tool servers to grant ([see below](#external-tools-mcp)) |
 
 `allowedTypes`, `maxProposals`, and `canTransitionTo` are enforced by the engine
 after the agent runs, not just requested in the prompt — a custom agent can't
@@ -412,6 +413,75 @@ default) means a rejected item becomes executable again and the executor will
 rework it — useful, but if the reviewer keeps objecting the pair can loop and
 burn usage. crew logs a loud warning each time this happens; watch for it, or
 give the reviewer a state that parks the work instead (e.g. `Backlog`).
+
+### External tools (MCP)
+
+By default an agent only knows what it can read in the repo. Grant it MCP
+servers and it can also pull in outside context — production errors, analytics,
+a docs index — so QA files the bugs that are *actually* firing rather than the
+ones it imagines.
+
+Define the servers once, then grant them per agent by name:
+
+```yaml
+# config.yaml — committed, so it holds ${PLACEHOLDERS}, never real keys
+mcpServers:
+  sentry:
+    command: "npx"
+    args: ["-y", "@sentry/mcp-server@latest"]
+    env:
+      SENTRY_AUTH_TOKEN: "${SENTRY_AUTH_TOKEN}"
+    allowedTools: ["find_errors", "get_issue_details"]   # optional, advisory (see below)
+
+personas:
+  qa:        { cadence: "0 */6 * * *", mcp: [sentry] }
+  architect: { cadence: "0 9 * * 2,5", mcp: [sentry] }
+  implementer: { cadence: "continuous" }                 # no mcp key = no tools
+```
+
+The real values go in `.crew/.env` or `~/.crew/env`, the same place as your
+other secrets. crew resolves them at spawn time into a temp file outside the
+repo, hands it to the agent CLI, and deletes it when the run ends — nothing
+sensitive is ever written into your repo or committed.
+
+A few deliberate behaviours:
+
+- **Grants are explicit.** An agent with no `mcp:` key gets no servers at all,
+  and never inherits the ones you've configured in Claude Code or Codex
+  yourself. Your crew config alone decides what a run can reach, so it behaves
+  the same on a teammate's machine or a cron box.
+- **A missing credential skips the run**, naming the variable, instead of
+  letting the agent burn a cycle discovering it can't authenticate.
+- **A typo'd server name fails at startup**, not silently at run time, whether
+  you wrote the grant in frontmatter or in `config.yaml`.
+- **Set `mcp: []` in `config.yaml`** to revoke a grant from a shared persona
+  file without editing that file.
+
+**`allowedTools` is advisory, not enforced.** Headless runs skip the permission
+system entirely — there's nobody to answer a prompt — which makes any CLI-level
+tool allowlist inert. crew states the pinned tools in the agent's prompt, and a
+model can ignore an instruction. Treat it as documentation of intent.
+
+So the boundaries that actually hold are: **which servers a persona is granted**,
+and **the scope of the token you issue**. Grant read-only servers and issue
+read-only tokens. crew's whole model is that agents *propose* and the engine
+files — dedup, `allowedTypes`, `maxProposals`, and the PRD approval gate all
+live there. A server that can create issues routes around every one of them;
+`crew doctor` warns if you grant one, but only the token scope stops it.
+
+Non-Claude CLIs need to be told how they take an MCP config, since they all
+spell it differently:
+
+```yaml
+agent:
+  provider: "codex"
+  command: "codex"
+  mcpConfigFlag: "--mcp-config"
+  mcpStrictFlag: "--strict-mcp-config"   # omit if the CLI has no equivalent
+```
+
+Leave `mcpConfigFlag` unset and granted servers are skipped with a warning
+rather than failing the cycle.
 
 ### Idle time
 

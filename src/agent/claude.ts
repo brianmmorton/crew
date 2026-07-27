@@ -39,6 +39,16 @@ function briefInput(input: Record<string, unknown> | undefined): string {
 export function runClaude(opts: RunPersonaOptions): Promise<PersonaResult> {
   const args = ["-p", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"];
   if (opts.model) args.push("--model", opts.model);
+  // Per-persona tooling. `--strict-mcp-config` is the important half: without it
+  // the run would also inherit whatever servers the user has configured
+  // globally, and a persona's tools would stop being reproducible across
+  // machines. Passed unconditionally so a persona granted nothing gets nothing.
+  //
+  // Note there is deliberately no `--allowedTools` here: it is ignored under
+  // `--dangerously-skip-permissions` (above), which headless runs require. A
+  // server's `allowedTools` is injected into the prompt by the runner instead.
+  args.push("--strict-mcp-config");
+  if (opts.mcpConfigPath) args.push("--mcp-config", opts.mcpConfigPath);
 
   return new Promise<PersonaResult>((resolve) => {
     // Force subscription billing: strip API-key creds from the child env.

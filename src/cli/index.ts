@@ -307,6 +307,7 @@ program
         if (a.label) opts.push(`label=${a.label}`);
         if (a.claims?.length) opts.push(`claims=${a.claims.join("/")}`);
         if (a.canTransitionTo?.length) opts.push(`canMoveTo=${a.canTransitionTo.join("/")}`);
+        if (a.mcp?.length) opts.push(`mcp=${a.mcp.join("/")}`);
         if (opts.length) console.log(`  ${"".padEnd(16)} ${opts.join("  ")}`);
       }
     }
@@ -413,6 +414,13 @@ function agentTemplate(
       `# canTransitionTo: ["Todo", "In Review"]`,
     );
   }
+
+  fm.push(
+    `# External tool servers to grant, by name from the mcpServers: block in`,
+    `# config.yaml. Omit for none — tools are never inherited from your own`,
+    `# Claude Code / Codex config.`,
+    `# mcp: [sentry]`,
+  );
 
   const body =
     kind === "proposer"

@@ -67,10 +67,13 @@ export async function buildPorts(cfg: CrewConfig): Promise<Ports> {
     throw e;
   }
   const git = new GitAdapter(cfg.repo.path, cfg.repo.baseBranch, forge);
-  const persona = new PersonaRunner(cfg);
+
+  const loaded = loadAgents(cfg);
+  // The runner needs the resolved agents to look up each persona's MCP grants.
+  const persona = new PersonaRunner(cfg, loaded);
 
   const agents: Record<PersonaName, AgentDef> = {};
-  for (const a of loadAgents(cfg)) agents[a.name] = a;
+  for (const a of loaded) agents[a.name] = a;
 
   return { tracker, git, persona, meta, agents, constitution: loadConstitution(cfg) };
 }

@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve, join, isAbsolute } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { configSchema } from "./schema.js";
+import { McpError, validateMcpServers } from "./mcp.js";
 import { findConfigRoot, inspectRepo, isGitRepo } from "../git/discover.js";
 import type { CrewConfig } from "../types.js";
 
@@ -137,6 +138,22 @@ export function loadConfig(startDir = crewRepoOverride() ?? process.cwd()): Crew
         `  - tracker/linear: define only one — \`linear:\` is the old name for \`tracker:\`.`,
     );
   }
+
+  // Structural problems in the tool block fail here rather than mid-run, where
+  // the same mistake surfaces as an agent silently missing the tools it was
+  // written to rely on.
+  try {
+    validateMcpServers(raw.mcpServers);
+  } catch (e) {
+    if (e instanceof McpError) {
+      throw new ConfigError(`Invalid config in ${configPath}:\n  - ${e.message}`);
+    }
+    throw e;
+  }
+
+  // Grants naming an undefined server are caught in `loadAgents`, which sees
+  // frontmatter and this block merged — checking only `personas:` here would
+  // miss the frontmatter half and let a typo fail open at run time.
 
   // `linear` is intentionally dropped from the resolved config: the engine reads
   // `cfg.tracker` only, so leaving both would let them drift apart.

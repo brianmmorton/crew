@@ -58,6 +58,47 @@ export interface PersonaConfig {
   label?: string;
   claims?: string[];
   canTransitionTo?: string[];
+  /**
+   * Names from the top-level `mcpServers:` block to grant this persona. Omitted
+   * or empty means no external tools at all — grants are always explicit, and a
+   * run never inherits the user's global MCP config. See `src/config/mcp.ts`.
+   */
+  mcp?: string[];
+}
+
+/**
+ * One MCP server definition, written under `mcpServers:` in config.yaml and
+ * granted to personas by name.
+ *
+ * Transport is implied by shape: `command` (+`args`) is stdio, `url` is
+ * http/sse. Secrets belong in `${VAR}` placeholders resolved from the
+ * environment at spawn time — config.yaml is committed.
+ */
+export interface McpServerConfig {
+  /** stdio transport: the binary to run, e.g. "npx". */
+  command?: string;
+  args?: string[];
+  /** http/sse transport: the server endpoint. */
+  url?: string;
+  /** Explicit transport for `url` servers when it can't be inferred. */
+  type?: "http" | "sse";
+  /** Environment for the server process; values may use `${VAR}`. */
+  env?: Record<string, string>;
+  /** Headers for `url` servers; values may use `${VAR}`. */
+  headers?: Record<string, string>;
+  /**
+   * The tools a persona should use from this server. Bare names are namespaced
+   * to `mcp__<server>__<tool>`; empty/omitted means every tool it exposes.
+   *
+   * ADVISORY, not enforced. Headless runs skip the permission system entirely
+   * (nobody is there to answer a prompt), which makes any tool allowlist inert
+   * at the CLI level — so this is injected into the prompt as an instruction.
+   * To actually restrict a server, grant it to fewer personas or issue it a
+   * narrower token.
+   */
+  allowedTools?: string[];
+  /** One-line note for `crew agents` / `crew doctor`. */
+  description?: string;
 }
 
 /**
@@ -100,6 +141,13 @@ export interface AgentDef {
    * transition not on this list. Empty/undefined = comment-only.
    */
   canTransitionTo?: string[];
+
+  // --- tooling (any kind) ---
+  /**
+   * MCP servers granted to this agent, by name from the `mcpServers:` block.
+   * Empty/undefined = no external tools. See `src/config/mcp.ts`.
+   */
+  mcp?: string[];
 }
 
 export type Severity = "low" | "medium" | "high" | "critical";
@@ -292,7 +340,23 @@ export interface CrewConfig {
     args: string[];
     promptVia: "stdin" | "arg";
     modelFlag?: string;
+    /**
+     * How a non-claude CLI takes an MCP config file, e.g. "--mcp-config". Unset
+     * means the CLI can't be given one, and personas granted MCP servers run
+     * without them (with a warning) rather than failing.
+     */
+    mcpConfigFlag?: string;
+    /**
+     * Flag that confines a non-claude CLI to the passed config, ignoring the
+     * user's global servers — Claude Code spells this `--strict-mcp-config`.
+     */
+    mcpStrictFlag?: string;
   };
+  /**
+   * External tool servers, granted to personas by name via `personas.<n>.mcp`.
+   * Values may reference `${VAR}` so secrets stay in .env; see config/mcp.ts.
+   */
+  mcpServers: Record<string, McpServerConfig>;
   /** Model selection. byComplexity overrides the default for that complexity. */
   models: {
     default?: string;
@@ -473,6 +537,12 @@ export interface RunPersonaOptions {
   expectJson: boolean;
   /** Called with a compact line for each streamed agent step (tool use, text). */
   onActivity?: (line: string) => void;
+  /**
+   * Path to a resolved MCP config file for this run, if the persona was granted
+   * any servers. The runner materializes it before the spawn and deletes it
+   * afterwards — it holds interpolated secrets. See `src/config/mcp.ts`.
+   */
+  mcpConfigPath?: string;
 }
 
 export interface PersonaPort {

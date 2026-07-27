@@ -139,6 +139,9 @@ export const configSchema = z.object({
         claims: z.array(z.string()).optional(),
         // reviewer: workflow states it may move an issue to (empty = comment only)
         canTransitionTo: z.array(z.string()).optional(),
+        // names from the top-level mcpServers block to grant this persona.
+        // Omitted = no external tools (grants are always explicit).
+        mcp: z.array(z.string()).optional(),
       }),
     )
     .default({}),
@@ -151,7 +154,33 @@ export const configSchema = z.object({
       args: z.array(z.string()).default([]), // base args before the prompt
       promptVia: z.enum(["stdin", "arg"]).default("stdin"),
       modelFlag: z.string().optional(), // how to pass the model, e.g. "--model"
+      // How a non-claude CLI takes an MCP config file, e.g. "--mcp-config".
+      // Unset = the CLI can't take one; granted servers are skipped with a warning.
+      mcpConfigFlag: z.string().optional(),
+      // Flag confining the CLI to that config, ignoring the user's global
+      // servers (Claude Code spells it "--strict-mcp-config").
+      mcpStrictFlag: z.string().optional(),
     })
+    .default({}),
+  /**
+   * External tool servers personas may be granted by name. Secrets belong in
+   * `${VAR}` placeholders resolved from .env at spawn time — this file is
+   * committed. See src/config/mcp.ts for the security model.
+   */
+  mcpServers: z
+    .record(
+      z.object({
+        command: z.string().optional(), // stdio transport
+        args: z.array(z.string()).default([]),
+        url: z.string().optional(), // http/sse transport
+        type: z.enum(["http", "sse"]).optional(),
+        env: z.record(z.string()).optional(),
+        headers: z.record(z.string()).optional(),
+        // Restrict which tools personas may call; bare names get namespaced.
+        allowedTools: z.array(z.string()).optional(),
+        description: z.string().optional(),
+      }),
+    )
     .default({}),
   models: z
     .object({
