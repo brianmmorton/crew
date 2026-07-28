@@ -495,6 +495,72 @@ test("adfToText on an empty or missing description yields an empty string", () =
   assert.equal(adfToText(textToAdf("")), "");
 });
 
+test("textToAdf turns a heading into a heading node with the right level", () => {
+  const doc = textToAdf("## Section") as {
+    content: Array<{ type: string; attrs?: { level: number } }>;
+  };
+  assert.equal(doc.content[0].type, "heading");
+  assert.equal(doc.content[0].attrs?.level, 2);
+});
+
+test("textToAdf turns bold, italic, and inline code into marked text nodes", () => {
+  const doc = textToAdf("**bold** and *italic* and `code`") as {
+    content: Array<{ content: Array<{ text: string; marks?: Array<{ type: string }> }> }>;
+  };
+  const nodes = doc.content[0].content;
+  assert.equal(nodes.find((n) => n.text === "bold")?.marks?.[0].type, "strong");
+  assert.equal(nodes.find((n) => n.text === "italic")?.marks?.[0].type, "em");
+  assert.equal(nodes.find((n) => n.text === "code")?.marks?.[0].type, "code");
+});
+
+test("textToAdf turns a markdown link into a link mark", () => {
+  const doc = textToAdf("see [docs](https://example.com)") as {
+    content: Array<{ content: Array<{ text: string; marks?: Array<{ type: string; attrs?: { href: string } }> }> }>;
+  };
+  const link = doc.content[0].content.find((n) => n.text === "docs");
+  assert.equal(link?.marks?.[0].type, "link");
+  assert.equal(link?.marks?.[0].attrs?.href, "https://example.com");
+});
+
+test("textToAdf turns a bullet list into a bulletList of listItems", () => {
+  const doc = textToAdf("- one\n- two") as {
+    content: Array<{ type: string; content?: unknown[] }>;
+  };
+  assert.equal(doc.content[0].type, "bulletList");
+  assert.equal(doc.content[0].content?.length, 2);
+});
+
+test("textToAdf turns a numbered list into an orderedList", () => {
+  const doc = textToAdf("1. one\n2. two") as {
+    content: Array<{ type: string; content?: unknown[] }>;
+  };
+  assert.equal(doc.content[0].type, "orderedList");
+  assert.equal(doc.content[0].content?.length, 2);
+});
+
+test("textToAdf turns a fenced code block into a codeBlock node", () => {
+  const doc = textToAdf("```ts\nconst x = 1;\n```") as {
+    content: Array<{ type: string; attrs?: { language: string }; content: Array<{ text: string }> }>;
+  };
+  assert.equal(doc.content[0].type, "codeBlock");
+  assert.equal(doc.content[0].attrs?.language, "ts");
+  assert.equal(doc.content[0].content[0].text, "const x = 1;");
+});
+
+test("textToAdf turns a blockquote into a blockquote node", () => {
+  const doc = textToAdf("> quoted text") as { content: Array<{ type: string }> };
+  assert.equal(doc.content[0].type, "blockquote");
+});
+
+test("adfToText recovers a plain-text-readable form of a formatted doc", () => {
+  const doc = textToAdf("## Title\n\n- one\n- two\n\nSome **bold** text.");
+  const text = adfToText(doc);
+  assert.match(text, /Title/);
+  assert.match(text, /one/);
+  assert.match(text, /two/);
+  assert.match(text, /bold/);
+});
+
 // ------------------------------- labels ------------------------------------
 
 test("jiraLabel collapses whitespace so Jira accepts the label", () => {

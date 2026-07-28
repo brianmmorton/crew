@@ -311,31 +311,147 @@ export class JiraClient {
 
 // ------------------------------ ADF helpers --------------------------------
 
+type AdfNode = { type: string; [key: string]: unknown };
+
 /**
- * Wrap plain text/markdown in an Atlassian Document Format doc.
+ * Convert markdown to an Atlassian Document Format doc.
  *
- * The v3 API rejects plain strings for rich-text fields. Agents emit markdown,
- * and faithfully converting markdown to ADF is a project in itself — so each
- * blank-line-separated block becomes one paragraph, which keeps the text
- * readable and never loses content. Markdown syntax renders literally.
+ * The v3 API rejects plain strings for rich-text fields, and agents emit
+ * markdown. This covers the subset agents actually produce: headings,
+ * bold/italic/code marks, links, bullet/ordered lists, code blocks, and
+ * blockquotes. Anything not recognized falls through as plain text — content
+ * is never dropped, worst case it renders as literal markdown syntax.
  */
 export function textToAdf(text: string): Record<string, unknown> {
-  const blocks = text.split(/\n{2,}/).filter((b) => b.trim() !== "");
-  const content = (blocks.length ? blocks : [""]).map((block) => ({
-    type: "paragraph",
-    content: block.trim()
-      ? // ADF forbids literal newlines inside a text node; use hardBreak marks.
-        block
-          .split("\n")
-          .flatMap((line, i) =>
-            i === 0
-              ? [{ type: "text", text: line }]
-              : [{ type: "hardBreak" }, { type: "text", text: line }],
-          )
-          .filter((n) => n.type !== "text" || (n as { text: string }).text !== "")
-      : [],
-  }));
-  return { type: "doc", version: 1, content };
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const content: AdfNode[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    if (line.trim() === "") {
+      i++;
+      continue;
+    }
+
+    // Fenced code block.
+    const fence = line.match(/^```(\S*)\s*$/);
+    if (fence) {
+      const codeLines: string[] = [];
+      i++;
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      i++; // skip closing fence
+      content.push({
+        type: "codeBlock",
+        ...(fence[1] ? { attrs: { language: fence[1] } } : {}),
+        content: [{ type: "text", text: codeLines.join("\n") }],
+      });
+      continue;
+    }
+
+    // Heading.
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      content.push({
+        type: "heading",
+        attrs: { level: heading[1].length },
+        content: inlineToAdf(heading[2]),
+      });
+      i++;
+      continue;
+    }
+
+    // Blockquote (consume consecutive `>` lines as one block).
+    if (/^>\s?/.test(line)) {
+      const quoted: string[] = [];
+      while (i < lines.length && /^>\s?/.test(lines[i])) {
+        quoted.push(lines[i].replace(/^>\s?/, ""));
+        i++;
+      }
+      content.push({
+        type: "blockquote",
+        content: [{ type: "paragraph", content: inlineToAdf(quoted.join(" ")) }],
+      });
+      continue;
+    }
+
+    // Bullet or ordered list (consume consecutive list-item lines).
+    const bulletItem = line.match(/^(\s*)[-*]\s+(.*)$/);
+    const orderedItem = line.match(/^(\s*)\d+[.)]\s+(.*)$/);
+    if (bulletItem || orderedItem) {
+      const ordered = !!orderedItem;
+      const items: string[] = [];
+      const re = ordered ? /^\s*\d+[.)]\s+(.*)$/ : /^\s*[-*]\s+(.*)$/;
+      while (i < lines.length && re.test(lines[i])) {
+        const m = lines[i].match(re);
+        if (m) items.push(m[1]);
+        i++;
+      }
+      content.push({
+        type: ordered ? "orderedList" : "bulletList",
+        content: items.map((item) => ({
+          type: "listItem",
+          content: [{ type: "paragraph", content: inlineToAdf(item) }],
+        })),
+      });
+      continue;
+    }
+
+    // Paragraph: consume until a blank line or the start of another block.
+    const paraLines: string[] = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() !== "" &&
+      !/^```/.test(lines[i]) &&
+      !/^#{1,6}\s+/.test(lines[i]) &&
+      !/^>\s?/.test(lines[i]) &&
+      !/^\s*[-*]\s+/.test(lines[i]) &&
+      !/^\s*\d+[.)]\s+/.test(lines[i])
+    ) {
+      paraLines.push(lines[i]);
+      i++;
+    }
+    content.push({
+      type: "paragraph",
+      content: paraLines.flatMap((paraLine, idx) => {
+        const inline = inlineToAdf(paraLine);
+        return idx === 0 ? inline : [{ type: "hardBreak" }, ...inline];
+      }),
+    });
+  }
+
+  return { type: "doc", version: 1, content: content.length ? content : [{ type: "paragraph", content: [] }] };
+}
+
+// Bold, italic, inline code, and links — the marks agents actually use.
+const INLINE_RE = /(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\*[^*]+\*|_[^_]+_|\[[^\]]+\]\([^)]+\))/;
+
+/** Parse a single line of inline markdown into ADF text nodes. */
+function inlineToAdf(line: string): AdfNode[] {
+  if (line === "") return [];
+  const parts = line.split(INLINE_RE).filter((p) => p !== "");
+  const out: AdfNode[] = [];
+
+  for (const part of parts) {
+    let m: RegExpMatchArray | null;
+    if ((m = part.match(/^\*\*([^*]+)\*\*$/)) || (m = part.match(/^__([^_]+)__$/))) {
+      out.push({ type: "text", text: m[1], marks: [{ type: "strong" }] });
+    } else if ((m = part.match(/^`([^`]+)`$/))) {
+      out.push({ type: "text", text: m[1], marks: [{ type: "code" }] });
+    } else if ((m = part.match(/^\*([^*]+)\*$/)) || (m = part.match(/^_([^_]+)_$/))) {
+      out.push({ type: "text", text: m[1], marks: [{ type: "em" }] });
+    } else if ((m = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/))) {
+      out.push({ type: "text", text: m[1], marks: [{ type: "link", attrs: { href: m[2] } }] });
+    } else {
+      out.push({ type: "text", text: part });
+    }
+  }
+
+  return out;
 }
 
 /** Flatten an ADF document (or plain string) back to text for the engine. */
@@ -356,7 +472,16 @@ export function adfToText(doc: unknown): string {
     if (Array.isArray(n.content)) {
       n.content.forEach(walk);
       // Block-level nodes end with a blank line so paragraphs stay separated.
-      if (n.type === "paragraph" || n.type === "heading") out.push("\n\n");
+      if (
+        n.type === "paragraph" ||
+        n.type === "heading" ||
+        n.type === "codeBlock" ||
+        n.type === "blockquote" ||
+        n.type === "bulletList" ||
+        n.type === "orderedList"
+      ) {
+        out.push("\n\n");
+      }
     }
   };
   walk(doc);
