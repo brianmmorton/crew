@@ -51,7 +51,50 @@ machine (package manager, language runtime, test runner, any CLIs). Run them wit
 `--version` or `command -v`. Tell the user exactly what's missing and how to
 install it — don't assume it's there.
 
-## 5. Constraints
+## 5. Prove the verify commands in a COLD worktree (required)
+Onboarding is NOT complete until `gates.setup` + every `gates.verify` command
+passes in a fresh worktree. Run:
+
+```
+crew doctor --verify-worktree
+```
+
+This creates a throwaway worktree from the base branch and runs your configured
+commands there — exactly what every agent run does.
+
+**Why this step exists.** Agents never work in the user's checkout; they work in
+a clean worktree containing only what git tracks. The user's checkout is warm:
+it has accumulated generated code, build output, and installed tooling that no
+longer appear in any tracked file. A verify command can depend on one of those,
+pass every time the user runs it by hand, and then fail on *every* agent run.
+Those failures are brutal to debug because the error blames the source code, not
+the missing build step — a missing generated database client surfaces as hundreds
+of "module has no exported member" errors that look like the agent broke the code.
+
+Common causes, all fixed by adding the missing step to `gates.setup`:
+- **Generated clients / codegen** — Prisma, GraphQL, protobuf, OpenAPI. These
+  generate into `node_modules` or a gitignored directory. Installing deps does
+  NOT regenerate them. If the project has a `db:generate` / `codegen` / `generate`
+  script, `gates.setup` almost certainly needs it.
+- **Build artifacts** — a package that must be compiled before dependents typecheck.
+- **PATH** — the worktree does not load the user's shell profile, so a version
+  manager (nvm/asdf/mise/pyenv) or a globally installed CLI may be absent.
+- **`.env` files** — gitignored, so they do not exist in the worktree. A check
+  that needs one must be made to work without it.
+- **External services** — a test needing a database, Redis, or a dev server. Agent
+  runs are unattended; a verify command must not depend on something started by hand.
+
+If the probe fails: read the diagnosis it prints, fix `gates.setup` or
+`gates.verify` in `config.yaml`, and re-run it. Repeat until green. Prefer fixing
+the root cause in the repo (e.g. a root `postinstall` that runs codegen) over
+patching `gates.setup`, since that also fixes CI and fresh clones — but only edit
+the repo's own files if the user agrees, since step 6 forbids touching app code.
+
+Do not declare onboarding finished with a failing probe. If you genuinely cannot
+make a command pass unattended, remove it from `gates.verify` and tell the user
+plainly which check is no longer gating their agents' work.
+
+## 6. Constraints
 - Do NOT touch secrets or any `.env` file. Do NOT modify application code.
 - When done, print a short summary of what you wrote and exactly what the user
   still needs to do by hand: set `tracker.provider` and `tracker.team` in

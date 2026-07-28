@@ -11,6 +11,7 @@ import { runSupervised } from "../engine/supervisor.js";
 import { runSetup } from "../setup/onboard.js";
 import { ensureGitignored } from "../util/gitignore.js";
 import { checkLabelGate, runDoctor } from "../util/doctor.js";
+import { probeVerify } from "../gates/probe.js";
 import { logger, logToFile, logFilePath } from "../util/logger.js";
 import { setColorEnabled } from "../util/color.js";
 import { Cron } from "croner";
@@ -178,7 +179,8 @@ program
 program
   .command("setup")
   .description("Onboard this repo: an agent tailors the crew config to your project, then sets up .env + .gitignore")
-  .action(async () => {
+  .option("--no-probe", "Skip proving the verify commands in a cold worktree")
+  .action(async (opts: { probe?: boolean }) => {
     const dir = crewDirName();
     const target = scaffoldTarget();
     const dest = join(target, dir);
@@ -190,15 +192,37 @@ program
     await runSetup(cfg);
     console.log("\nChecking prerequisites:");
     await runDoctor(cfg, logger);
+
+    // Re-read: the onboarding agent just rewrote config.yaml, so the in-memory
+    // cfg predates the verify commands we're about to prove.
+    if (opts.probe === false) {
+      console.log(
+        "\nSkipped the cold-worktree verify check. Run it before your first cycle:\n" +
+          "  crew doctor --verify-worktree",
+      );
+    } else {
+      await probeVerify(loadConfig(target));
+    }
   });
 
 program
   .command("doctor")
   .description("Check that the tools and secrets your configured providers need are present")
-  .action(async () => {
+  .option(
+    "--verify-worktree",
+    "Also prove gates.setup + gates.verify pass in a cold worktree (slow: runs your real checks)",
+  )
+  .action(async (opts: { verifyWorktree?: boolean }) => {
     const cfg = loadConfig();
     console.log("Prerequisites:");
     const ok = await runDoctor(cfg, logger);
+
+    // Opt-in: this runs the project's real setup + verify commands, which can
+    // take minutes. Never part of the default doctor run.
+    if (opts.verifyWorktree) {
+      const result = await probeVerify(cfg);
+      if (!result.ok) process.exit(1);
+    }
     // Advisory, and only worth attempting once the credentials above passed —
     // it needs a live tracker. A failure here never changes the exit code.
     if (ok) {
