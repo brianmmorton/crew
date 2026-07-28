@@ -33,6 +33,7 @@ import { formatStuck, stuckItems } from "../engine/stuck.js";
 import { listClaims, releaseClaim } from "../engine/claim.js";
 import { clearVerifyFailure } from "../util/verifyfail.js";
 import { setResumeAttempts, setVerifyAttempts } from "../util/state.js";
+import { forgetToken, hasStoredToken } from "../config/oauth.js";
 
 /** Compute the next fire time for a cron cadence, or null if it never/invalid. */
 function nextRunFor(cadence: string): Date | null {
@@ -369,6 +370,10 @@ program
   .description("Live status screen: agents, log tail, and in-flight work")
   .action(async () => {
     const cfg = loadConfig();
+    // Quiet: warn to the log file on missing prereqs (OAuth logins included)
+    // and continue — the header now surfaces OAuth login state live, so this
+    // is a startup nudge into the log, not a gate.
+    await runDoctor(cfg, logger, true);
     const { runTui } = await import("../tui/index.js");
     await runTui(cfg);
   });
@@ -812,6 +817,64 @@ rather than inventing objections.
 
   return `---\n${fm.join("\n")}\n---\n\n${body}`;
 }
+
+const mcpCmd = program.command("mcp").description("Manage OAuth for MCP servers defined under mcpServers:");
+
+mcpCmd
+  .command("login")
+  .argument("<server>", "server name from mcpServers: in config.yaml")
+  .description("Authorize an OAuth-protected MCP server interactively (opens a browser, one-time)")
+  .action(async (server: string) => {
+    const cfg = loadConfig();
+    const def = cfg.mcpServers?.[server];
+    if (!def) {
+      console.error(
+        `Unknown MCP server "${server}" (known: ${Object.keys(cfg.mcpServers ?? {}).join(", ") || "none"})`,
+      );
+      process.exit(1);
+    }
+    if (!def.oauth) {
+      console.error(`mcpServers.${server} has no \`oauth:\` block — nothing to log in to.`);
+      process.exit(1);
+    }
+    const { loginInteractive } = await import("../config/oauth.js");
+    console.log(`Opening a browser to authorize "${server}"...`);
+    try {
+      await loginInteractive(server, def.oauth, {
+        onUrl: (url) => console.log(`If it didn't open automatically, visit:\n  ${url}\n`),
+      });
+    } catch (e) {
+      console.error(`Login failed: ${(e as Error).message}`);
+      process.exit(1);
+    }
+    console.log(`Logged in. Token stored in ~/.crew/oauth/${server}.json — grant it to a persona with \`mcp: [${server}]\`.`);
+  });
+
+mcpCmd
+  .command("logout")
+  .argument("<server>", "server name from mcpServers: in config.yaml")
+  .description("Forget the stored OAuth token for a server")
+  .action((server: string) => {
+    // No need for def/oauth to still be configured — this only clears local
+    // state, so it works even after the server was renamed or removed.
+    forgetToken(server);
+    console.log(`Cleared any stored token for "${server}".`);
+  });
+
+mcpCmd
+  .command("status", { isDefault: true })
+  .description("Show which OAuth MCP servers are logged in")
+  .action(() => {
+    const cfg = loadConfig();
+    const oauthServers = Object.entries(cfg.mcpServers ?? {}).filter(([, def]) => def.oauth);
+    if (!oauthServers.length) {
+      console.log("No mcpServers.* entries have an `oauth:` block.");
+      return;
+    }
+    for (const [name] of oauthServers) {
+      console.log(`  ${hasStoredToken(name) ? "✓" : "✗"} ${name}${hasStoredToken(name) ? "" : "   → crew mcp login " + name}`);
+    }
+  });
 
 program
   .command("run")

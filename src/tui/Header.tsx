@@ -44,6 +44,22 @@ export function Header({ snap, logoArt }: { snap: Snapshot; logoArt: LogoArt | n
           </>
         )}
       </Box>
+      {snap.mcpOAuth.length > 0 && (
+        <Box>
+          <Text dimColor>mcp </Text>
+          {snap.mcpOAuth.map((row, i) => (
+            <Text key={row.server}>
+              {i > 0 && <Text dimColor>  </Text>}
+              <Text color={row.loggedIn ? "green" : "yellow"}>
+                {row.loggedIn ? "●" : "○"} {row.server}
+              </Text>
+            </Text>
+          ))}
+          {snap.mcpOAuth.some((r) => !r.loggedIn) && (
+            <Text dimColor>   (crew mcp login &lt;server&gt;)</Text>
+          )}
+        </Box>
+      )}
     </Box>
   );
 }

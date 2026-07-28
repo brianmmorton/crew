@@ -135,10 +135,13 @@ export function App({ cfg }: { cfg: CrewConfig }) {
     );
   }
 
-  // Header ~4 lines, AGENTS block ~(rows+2), IN FLIGHT block variable, footer 1.
-  // The log panel takes whatever is left, so it's the one section that grows
-  // or shrinks with the terminal instead of the terminal scrolling past it.
-  const reserved = 4 + agentRows.length + 2 + (snap.stuck.length ? snap.stuck.length + 2 : 0) + 2;
+  // Header ~4 lines (+1 if the mcp oauth row renders), AGENTS block
+  // ~(rows+2), IN FLIGHT block variable, footer 1. The log panel takes
+  // whatever is left, so it's the one section that grows or shrinks with the
+  // terminal instead of the terminal scrolling past it.
+  const headerLines = 4 + (snap.mcpOAuth.length > 0 ? 1 : 0);
+  const reserved =
+    headerLines + agentRows.length + 2 + (snap.stuck.length ? snap.stuck.length + 2 : 0) + 2;
   const logHeight = Math.max(4, rows - reserved);
 
   return (

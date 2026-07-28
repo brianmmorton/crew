@@ -6,12 +6,19 @@ import { poolStatus, worktreeRootFor, type SlotMeta } from "../git/pool.js";
 import { stuckItems, type StuckItem } from "../engine/stuck.js";
 import { readState } from "../util/state.js";
 import { logFilePath } from "../util/logger.js";
+import { hasStoredToken } from "../config/oauth.js";
 import type { AgentDef, CrewConfig } from "../types.js";
 
 /** One row in the agent panel: static definition plus its next/last fire time. */
 export interface AgentRow {
   agent: AgentDef;
   next: Date | null;
+}
+
+/** Login state of one OAuth-protected MCP server granted to some agent. */
+export interface McpOAuthRow {
+  server: string;
+  loggedIn: boolean;
 }
 
 /** Everything the screen redraws from, gathered in one pass. */
@@ -24,7 +31,22 @@ export interface Snapshot {
   stuck: StuckItem[];
   supervisorAlive: boolean;
   logPath: string;
+  mcpOAuth: McpOAuthRow[];
   error: string | null;
+}
+
+/**
+ * Login state for every OAuth-protected server actually granted to some
+ * agent — same filter `crew doctor` uses, so an `oauth:` block defined but
+ * never granted doesn't clutter the header with a login nobody needs.
+ */
+function mcpOAuthRows(cfg: CrewConfig, agents: AgentDef[]): McpOAuthRow[] {
+  const servers = cfg.mcpServers ?? {};
+  const granted = new Set(agents.flatMap((a) => a.mcp ?? []));
+  return [...granted]
+    .filter((name) => servers[name]?.oauth)
+    .sort()
+    .map((server) => ({ server, loggedIn: hasStoredToken(server) }));
 }
 
 function nextRunFor(cadence: string): Date | null {
@@ -88,6 +110,7 @@ export async function takeSnapshot(cfg: CrewConfig): Promise<Snapshot> {
       stuck: stuckItems(cfg),
       supervisorAlive: pidAlive(state.pid),
       logPath: logFilePath(cfg.configDir),
+      mcpOAuth: mcpOAuthRows(cfg, agents),
       error: null,
     };
   } catch (e) {
@@ -100,6 +123,7 @@ export async function takeSnapshot(cfg: CrewConfig): Promise<Snapshot> {
       stuck: [],
       supervisorAlive: false,
       logPath: logFilePath(cfg.configDir),
+      mcpOAuth: [],
       error: e instanceof Error ? e.message : String(e),
     };
   }

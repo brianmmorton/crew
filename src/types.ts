@@ -87,6 +87,14 @@ export interface McpServerConfig {
   /** Headers for `url` servers; values may use `${VAR}`. */
   headers?: Record<string, string>;
   /**
+   * OAuth 2.0 (authorization code + PKCE) for `url` servers that require it
+   * instead of a static bearer token. Run `crew mcp login <name>` once to
+   * authorize interactively; the resulting token is stored under
+   * `~/.crew/oauth/` and refreshed automatically before each headless run.
+   * See `src/config/oauth.ts` for the flow and refresh logic.
+   */
+  oauth?: McpOAuthConfig;
+  /**
    * The tools a persona should use from this server. Bare names are namespaced
    * to `mcp__<server>__<tool>`; empty/omitted means every tool it exposes.
    *
@@ -99,6 +107,25 @@ export interface McpServerConfig {
   allowedTools?: string[];
   /** One-line note for `crew agents` / `crew doctor`. */
   description?: string;
+}
+
+/**
+ * Authorization-code + PKCE OAuth 2.0 for one MCP server. `clientId` and the
+ * two endpoint URLs are not secrets (they identify the app, not authorize it)
+ * so they're written directly rather than through `${VAR}` — but any of the
+ * three may still use a placeholder if you'd rather not commit them.
+ * `clientSecret` almost always should, since confidential clients have one.
+ */
+export interface McpOAuthConfig {
+  authorizationUrl: string;
+  tokenUrl: string;
+  clientId: string;
+  /** Confidential clients only; omit for a public client using PKCE alone. */
+  clientSecret?: string;
+  /** Space-separated, as sent to the provider. */
+  scopes?: string;
+  /** Defaults to a loopback redirect on an ephemeral port for `crew mcp login`. */
+  redirectUri?: string;
 }
 
 /**

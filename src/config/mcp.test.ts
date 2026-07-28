@@ -82,37 +82,37 @@ test("referencedVars skips placeholders that carry a default", () => {
 
 // ----------------------------- resolution -----------------------------------
 
-test("resolveMcpForPersona returns null when the persona was granted nothing", () => {
+test("resolveMcpForPersona returns null when the persona was granted nothing", async () => {
   // The default: no key means no tools, never an inherited global config.
-  assert.equal(resolveMcpForPersona(undefined, { sentry: SENTRY }), null);
-  assert.equal(resolveMcpForPersona([], { sentry: SENTRY }), null);
+  assert.equal(await resolveMcpForPersona(undefined, { sentry: SENTRY }), null);
+  assert.equal(await resolveMcpForPersona([], { sentry: SENTRY }), null);
 });
 
-test("resolveMcpForPersona grants only the named servers", () => {
+test("resolveMcpForPersona grants only the named servers", async () => {
   const servers = { sentry: SENTRY, other: { command: "other" } };
-  const out = resolveMcpForPersona(["sentry"], servers, { SENTRY_AUTH_TOKEN: "t" });
+  const out = await resolveMcpForPersona(["sentry"], servers, { SENTRY_AUTH_TOKEN: "t" });
   assert.deepEqual(out?.names, ["sentry"]);
   assert.deepEqual(Object.keys(out!.document.mcpServers), ["sentry"]);
 });
 
-test("resolveMcpForPersona interpolates secrets into the resolved document", () => {
-  const out = resolveMcpForPersona(["sentry"], { sentry: SENTRY }, { SENTRY_AUTH_TOKEN: "tok-123" });
+test("resolveMcpForPersona interpolates secrets into the resolved document", async () => {
+  const out = await resolveMcpForPersona(["sentry"], { sentry: SENTRY }, { SENTRY_AUTH_TOKEN: "tok-123" });
   const resolved = out!.document.mcpServers.sentry as { env: Record<string, string> };
   assert.equal(resolved.env.SENTRY_AUTH_TOKEN, "tok-123");
   assert.deepEqual(out!.missingVars, []);
 });
 
-test("resolveMcpForPersona reports missing credentials rather than resolving them blank", () => {
-  const out = resolveMcpForPersona(["sentry"], { sentry: SENTRY }, {});
+test("resolveMcpForPersona reports missing credentials rather than resolving them blank", async () => {
+  const out = await resolveMcpForPersona(["sentry"], { sentry: SENTRY }, {});
   assert.deepEqual(out?.missingVars, ["SENTRY_AUTH_TOKEN"]);
 });
 
-test("resolveMcpForPersona throws on a grant naming an undefined server", () => {
-  assert.throws(() => resolveMcpForPersona(["nope"], { sentry: SENTRY }), McpError);
+test("resolveMcpForPersona throws on a grant naming an undefined server", async () => {
+  await assert.rejects(() => resolveMcpForPersona(["nope"], { sentry: SENTRY }), McpError);
 });
 
-test("resolveMcpForPersona keeps url servers and their headers", () => {
-  const out = resolveMcpForPersona(
+test("resolveMcpForPersona keeps url servers and their headers", async () => {
+  const out = await resolveMcpForPersona(
     ["analytics"],
     { analytics: { url: "https://mcp.example.com", type: "http", headers: { Authorization: "Bearer ${K}" } } },
     { K: "abc" },
@@ -121,6 +121,27 @@ test("resolveMcpForPersona keeps url servers and their headers", () => {
   assert.equal(resolved.url, "https://mcp.example.com");
   assert.equal(resolved.type, "http");
   assert.deepEqual(resolved.headers, { Authorization: "Bearer abc" });
+});
+
+test("resolveMcpForPersona reports an oauth failure rather than resolving without auth", async () => {
+  const out = await resolveMcpForPersona(
+    ["secured"],
+    {
+      secured: {
+        url: "https://mcp.example.com",
+        oauth: {
+          authorizationUrl: "https://example.com/authorize",
+          tokenUrl: "https://example.com/token",
+          clientId: "abc",
+        },
+      },
+    },
+    {},
+  );
+  assert.equal(out?.oauthErrors.length, 1);
+  assert.match(out!.oauthErrors[0], /no stored token for "secured"/);
+  const resolved = out!.document.mcpServers.secured as Record<string, unknown>;
+  assert.equal(resolved.headers, undefined);
 });
 
 // ----------------------------- materialization ------------------------------

@@ -30,9 +30,9 @@ export class PersonaRunner implements PersonaPort {
 
   async run(name: PersonaName, opts: RunPersonaOptions): Promise<PersonaResult> {
     const grants = this.agents.find((a) => a.name === name)?.mcp;
-    let mcp: ReturnType<typeof resolveMcpForPersona> = null;
+    let mcp: Awaited<ReturnType<typeof resolveMcpForPersona>> = null;
     try {
-      mcp = resolveMcpForPersona(grants, this.cfg.mcpServers ?? {});
+      mcp = await resolveMcpForPersona(grants, this.cfg.mcpServers ?? {});
     } catch (e) {
       // A bad grant is a config bug, not an agent failure. Report it as a failed
       // run so the cycle records it and moves on, rather than crashing the loop.
@@ -51,6 +51,12 @@ export class PersonaRunner implements PersonaPort {
           `[crew] ${name}: skipped — MCP servers (${mcp.names.join(", ")}) need ` +
           `${mcp.missingVars.join(", ")}, which ${mcp.missingVars.length === 1 ? "is" : "are"} ` +
           `unset. Add ${mcp.missingVars.length === 1 ? "it" : "them"} to .env or ~/.crew/env.`,
+        raw: "",
+      };
+    }
+    if (mcp && mcp.oauthErrors.length) {
+      return {
+        summary: `[crew] ${name}: skipped — ${mcp.oauthErrors.join("; ")}`,
         raw: "",
       };
     }

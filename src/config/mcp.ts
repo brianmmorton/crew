@@ -28,6 +28,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { McpServerConfig } from "../types.js";
+import { accessTokenFor, OAuthError } from "./oauth.js";
 
 /** Thrown for a malformed or unsafe MCP block; surfaced by `crew doctor`. */
 export class McpError extends Error {}
@@ -91,12 +92,21 @@ export function referencedVars(server: McpServerConfig): string[] {
 /**
  * Resolve one server definition against the environment. Returns the wire shape
  * Claude Code's `--mcp-config` expects, plus any variables that were missing.
+ *
+ * `oauth` servers get their `Authorization` header injected here rather than
+ * through `${VAR}` interpolation: the access token is short-lived and refreshed
+ * from a locally-stored refresh token (see `src/config/oauth.ts`), so there is
+ * no stable env var to point a placeholder at. A refresh failure is reported
+ * through `oauthErrors`, the same way an unset `${VAR}` is reported through
+ * `missing` — both mean "skip this run", not "crash it".
  */
-function resolveServer(
+async function resolveServer(
+  name: string,
   server: McpServerConfig,
   env: NodeJS.ProcessEnv,
   missing: string[],
-): Record<string, unknown> {
+  oauthErrors: string[],
+): Promise<Record<string, unknown>> {
   const out: Record<string, unknown> = {};
   // Transport is implied by shape: `command` = stdio, `url` = http/sse. Claude
   // Code infers the same way, so we pass through rather than inventing a key.
@@ -113,11 +123,19 @@ function resolveServer(
       Object.entries(server.env).map(([k, v]) => [k, interpolate(v, env, missing)]),
     );
   }
-  if (server.headers) {
-    out.headers = Object.fromEntries(
-      Object.entries(server.headers).map(([k, v]) => [k, interpolate(v, env, missing)]),
-    );
+  const headers: Record<string, string> = server.headers
+    ? Object.fromEntries(
+        Object.entries(server.headers).map(([k, v]) => [k, interpolate(v, env, missing)]),
+      )
+    : {};
+  if (server.oauth) {
+    try {
+      headers.Authorization = `Bearer ${await accessTokenFor(name, server.oauth)}`;
+    } catch (e) {
+      oauthErrors.push(e instanceof OAuthError ? e.message : String(e));
+    }
   }
+  if (Object.keys(headers).length) out.headers = headers;
   return out;
 }
 
@@ -128,23 +146,26 @@ export interface ResolvedMcp {
   names: string[];
   /** `${VAR}`s with no value and no default — the run should be skipped. */
   missingVars: string[];
+  /** OAuth login/refresh failures — the run should be skipped. */
+  oauthErrors: string[];
 }
 
 /**
  * Build the MCP document for one persona: the named servers it was granted,
- * with environment variables resolved.
+ * with environment variables resolved and OAuth tokens refreshed.
  *
  * Returns `null` when the persona was granted nothing, which is the default and
  * means "spawn with no MCP config at all".
  */
-export function resolveMcpForPersona(
+export async function resolveMcpForPersona(
   grants: string[] | undefined,
   servers: Record<string, McpServerConfig>,
   env: NodeJS.ProcessEnv = process.env,
-): ResolvedMcp | null {
+): Promise<ResolvedMcp | null> {
   if (!grants || grants.length === 0) return null;
 
   const missingVars: string[] = [];
+  const oauthErrors: string[] = [];
   const mcpServers: Record<string, unknown> = {};
   const names: string[] = [];
 
@@ -156,11 +177,11 @@ export function resolveMcpForPersona(
           `(known: ${Object.keys(servers).join(", ") || "none"})`,
       );
     }
-    mcpServers[name] = resolveServer(def, env, missingVars);
+    mcpServers[name] = await resolveServer(name, def, env, missingVars, oauthErrors);
     names.push(name);
   }
 
-  return { document: { mcpServers }, names, missingVars };
+  return { document: { mcpServers }, names, missingVars, oauthErrors };
 }
 
 /**

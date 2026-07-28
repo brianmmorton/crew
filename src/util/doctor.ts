@@ -5,6 +5,7 @@ import { loadEnvFiles } from "./env.js";
 import { REQUIRED_ENV } from "../tracker/factory.js";
 import { FORGE_ENV, forgeCredentialsPresent, forgeEnvHint } from "../git/forge/factory.js";
 import { referencedVars, validateMcpServers } from "../config/mcp.js";
+import { hasStoredToken } from "../config/oauth.js";
 
 const pExecFile = promisify(execFile);
 
@@ -129,6 +130,18 @@ export async function runDoctor(
         // entirely, so it is a real broken configuration, not a nicety.
         detail: process.env[v]?.trim() ? "set" : `missing (mcpServers.${name})`,
         hint: `add to ${cfg.configDir}/.env`,
+      });
+    }
+    if (def.oauth) {
+      const ok = hasStoredToken(name);
+      checks.push({
+        name: `${name} (oauth)`,
+        ok,
+        // A stored token isn't proof it still refreshes — that needs a live
+        // call, which doctor doesn't make. Absence is the one thing checkable
+        // for free, and it is also the one failure that skips every run.
+        detail: ok ? "logged in" : "not logged in",
+        hint: `crew mcp login ${name}`,
       });
     }
   }

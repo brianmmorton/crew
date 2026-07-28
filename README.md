@@ -548,6 +548,42 @@ agent:
 Leave `mcpConfigFlag` unset and granted servers are skipped with a warning
 rather than failing the cycle.
 
+#### OAuth-protected servers
+
+Some MCP servers require OAuth instead of a static token. crew's own runs are
+headless — cron-fired, nobody at a keyboard to click through a consent screen —
+so the browser step happens exactly once, ahead of time, from your terminal.
+After that, crew refreshes the access token itself before every run, no
+browser involved:
+
+```yaml
+mcpServers:
+  linear:
+    url: "https://mcp.linear.app/mcp"
+    type: "http"
+    oauth:
+      authorizationUrl: "https://mcp.linear.app/authorize"
+      tokenUrl: "https://mcp.linear.app/token"
+      clientId: "${LINEAR_MCP_CLIENT_ID}"
+      # clientSecret: "${LINEAR_MCP_CLIENT_SECRET}"   # confidential clients only
+      scopes: "read"
+```
+
+```
+crew mcp login linear     # opens a browser once; stores a refresh token
+crew mcp status           # which oauth servers are logged in
+crew mcp logout linear    # forget the stored token
+```
+
+The token is stored under `~/.crew/oauth/<server>.json` (mode `0600`), never
+in the repo. At spawn time crew exchanges the refresh token for a fresh access
+token and injects it as `Authorization: Bearer <token>` — you never set
+`headers` yourself for an `oauth` server. If the stored token can't be
+refreshed (revoked, or `crew mcp login` was never run), that persona's run is
+skipped with a message telling you which server to log back into, the same way
+a missing `${VAR}` skips a run rather than failing it silently. `crew doctor`
+reports login state for every OAuth server a persona is granted.
+
 ### Idle time
 
 Proposers run on a cron cadence, but the executor drains work continuously — so

@@ -223,6 +223,17 @@ export const configSchema = z.object({
         type: z.enum(["http", "sse"]).optional(),
         env: z.record(z.string()).optional(),
         headers: z.record(z.string()).optional(),
+        // Authorization-code + PKCE for `url` servers; see McpOAuthConfig.
+        oauth: z
+          .object({
+            authorizationUrl: z.string(),
+            tokenUrl: z.string(),
+            clientId: z.string(),
+            clientSecret: z.string().optional(),
+            scopes: z.string().optional(),
+            redirectUri: z.string().optional(),
+          })
+          .optional(),
         // Restrict which tools personas may call; bare names get namespaced.
         allowedTools: z.array(z.string()).optional(),
         description: z.string().optional(),
