@@ -168,6 +168,22 @@ test("a pooled slot whose checkout was deleted underneath is rebuilt", async () 
   assert.equal(readMeta(poolDir, 0).state, "busy");
 });
 
+test("a pooled slot whose .git is corrupted is rebuilt, not handed to the agent", async () => {
+  const { git, poolDir } = repo(POOL);
+  const wt = await git.createWorktree("agent/abc-1");
+  await git.removeWorktree(wt);
+  // Simulate a broken worktree link: the directory and git's own registry
+  // both still say this slot is a worktree, but the slot's `.git` file no
+  // longer resolves — e.g. a half-finished reset or something clobbering it.
+  writeFileSync(join(wt, ".git"), "gitdir: /nowhere/does/not/exist\n");
+
+  const again = await git.createWorktree("agent/abc-2");
+  assert.equal(again, wt, "the same slot path is reused");
+  assert.ok(existsSync(join(again, "a.txt")), "the checkout is recreated cold");
+  execFileSync("git", ["-C", again, "rev-parse", "--git-dir"]); // must not throw
+  assert.equal(readMeta(poolDir, 0).state, "busy");
+});
+
 test("a blocking branch fails before a pool slot is consumed", async () => {
   // Checked before acquireSlot: the branch can never be created, so claiming a
   // slot would burn one and then fail anyway — and on a full pool that would

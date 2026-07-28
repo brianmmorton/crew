@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync, realpathSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { CheckoutSnapshot, ForgePort, GitPort, OpenPrOptions } from "../types.js";
 import { matchesAny } from "../util/glob.js";
@@ -203,13 +203,27 @@ export class GitAdapter implements GitPort {
   /** Observer for pool acquisitions, so the engine can log timings. */
   onPoolEvent?: (e: { slot: number; how: string; ms: number; path: string }) => void;
 
-  /** Is `path` a directory git currently tracks as a worktree of this repo? */
+  /**
+   * Is `path` a directory git currently tracks as a worktree of this repo,
+   * AND does its own `.git` file actually resolve there?
+   *
+   * The two can disagree: the primary repo's `worktree list` is a registry
+   * entry, but the slot's `.git` is a separate file living inside the slot
+   * itself. If that file is missing, empty, or points somewhere stale — a
+   * half-finished reset, a disk hiccup, an agent that ran a destructive git
+   * command in its own tree — the registry can still list the slot as valid
+   * while ordinary git commands inside it fail with "not a git repository".
+   * The fast (reset) path in `acquirePooled` never re-checks that once this
+   * returns true, so a slot in that state would be handed to the next agent
+   * as-is: it would fail to commit, and any work would land wherever the
+   * agent's tooling fell back to instead — outside the worktree.
+   */
   private async isTrackedWorktree(path: string): Promise<boolean> {
     if (!existsSync(path)) return false;
     try {
       const list = await this.git(["-C", this.repoPath, "worktree", "list", "--porcelain"]);
       const want = realpathSync(path);
-      return list
+      const registered = list
         .split("\n")
         .filter((l) => l.startsWith("worktree "))
         .map((l) => l.slice("worktree ".length).trim())
@@ -220,6 +234,20 @@ export class GitAdapter implements GitPort {
             return false;
           }
         });
+      if (!registered) return false;
+
+      // Confirm the slot's own .git resolves into THIS repo's worktree
+      // metadata, not just that the repo's registry mentions the path.
+      // `--git-dir` is absolute on modern git but relative on older versions;
+      // `resolve` (unlike `join`) handles both by discarding `path` when
+      // `gitDir` is already absolute.
+      const gitDir = await this.git(["-C", path, "rev-parse", "--git-dir"]);
+      const resolvedGitDir = realpathSync(resolve(path, gitDir));
+      const resolvedMainGitDir = realpathSync(join(this.repoPath, ".git"));
+      return (
+        resolvedGitDir.startsWith(`${resolvedMainGitDir}${sep}worktrees${sep}`) ||
+        resolvedGitDir === resolvedMainGitDir
+      );
     } catch {
       return false;
     }
