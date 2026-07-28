@@ -1,6 +1,6 @@
 {
   "name": "@brianmorton/crew",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "Autonomous agent team: role-specialized coding agents that propose typed work into Linear or Jira, gate material changes behind human-approved PRDs, and drain approved work into PRs — running on your machine against your Claude subscription.",
   "type": "module",
   "license": "MIT",
