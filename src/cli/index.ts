@@ -298,6 +298,15 @@ program
     console.log(`run sooner:   crew once <agent>        (see: crew agents)`);
   });
 
+program
+  .command("tui")
+  .description("Live status screen: agents, log tail, and in-flight work")
+  .action(async () => {
+    const cfg = loadConfig();
+    const { runTui } = await import("../tui/index.js");
+    await runTui(cfg);
+  });
+
 const worktreeCmd = program
   .command("worktrees")
   .description("Inspect and manage the reusable worktree pool (worktrees.reuse)");
