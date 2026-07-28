@@ -251,6 +251,14 @@ export const configSchema = z.object({
       dedupLookbackDays: z.number().int().min(0).default(30),
     })
     .default({}),
+  ui: z
+    .object({
+      // Rendered as ASCII art in the TUI header and startup splash in place of
+      // the "crew" wordmark. Fetched and converted on each TUI launch; falls
+      // back to the wordmark if the URL is unset, unreachable, or undecodable.
+      logoUrl: z.string().optional(),
+    })
+    .default({}),
   // Pull proposers in early when the executor has nothing to do, instead of
   // leaving the team idle until the next cron tick.
   idle: z

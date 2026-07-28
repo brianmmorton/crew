@@ -1,6 +1,8 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { Snapshot } from "./snapshot.js";
+import { Logo } from "./Logo.js";
+import type { LogoArt } from "./logoArt.js";
 
 function poolCounts(slots: Snapshot["slots"]): string | null {
   if (!slots) return null;
@@ -8,14 +10,17 @@ function poolCounts(slots: Snapshot["slots"]): string | null {
   return `${count("free")} free  ${count("busy")} busy  ${count("retained")} retained`;
 }
 
-export function Header({ snap }: { snap: Snapshot }) {
+export function Header({ snap, logoArt }: { snap: Snapshot; logoArt: LogoArt | null }) {
   const pool = poolCounts(snap.slots);
   return (
     <Box flexDirection="column" marginBottom={1}>
+      {logoArt && <Logo art={logoArt} />}
       <Box>
-        <Text bold color="cyan">
-          crew
-        </Text>
+        {!logoArt && (
+          <Text bold color="cyan">
+            crew
+          </Text>
+        )}
         <Text dimColor>  {snap.cfg.project}</Text>
         <Text dimColor>  ·  {snap.cfg.repo.path.split("/").pop()}</Text>
         <Box flexGrow={1} />

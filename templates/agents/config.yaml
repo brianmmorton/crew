@@ -292,3 +292,11 @@ idle:
   maxEmptyRuns: 3
   # Which proposers idle may run. Empty = all of them.
   agents: []
+
+# Customize the `crew` TUI. All optional.
+# ui:
+#   # Rendered as ASCII art in the TUI header and startup splash, in place of
+#   # the default "crew" wordmark. Any image URL jimp can decode (png/jpg/gif/
+#   # bmp/tiff). Refetched on every TUI launch; silently falls back to the
+#   # wordmark if the URL is unreachable or undecodable.
+#   logoUrl: "https://example.com/logo.png"

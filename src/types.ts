@@ -387,6 +387,10 @@ export interface CrewConfig {
     backlogCap: number;
     dedupLookbackDays: number;
   };
+  ui: {
+    /** Custom logo, rendered as ASCII art in the TUI in place of the wordmark. */
+    logoUrl?: string;
+  };
   /** Idle-triggered proposers: run them early when the executor runs dry. */
   idle: {
     enabled: boolean;

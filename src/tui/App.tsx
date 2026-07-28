@@ -9,6 +9,7 @@ import { LogPanel } from "./LogPanel.js";
 import { InFlight } from "./InFlight.js";
 import { RunView } from "./RunView.js";
 import { LoadingSplash } from "./Spinner.js";
+import { fetchLogoArt, type LogoArt } from "./logoArt.js";
 
 const POLL_MS = 1000;
 const MAX_LOG_LINES = 500;
@@ -22,9 +23,26 @@ export function App({ cfg }: { cfg: CrewConfig }) {
   const [selected, setSelected] = useState(0);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [, forceRender] = useState(0);
+  const [headerLogo, setHeaderLogo] = useState<LogoArt | null>(null);
+  const [splashLogo, setSplashLogo] = useState<LogoArt | null>(null);
 
   const runManager = useMemo(() => new RunManager(), []);
   const runsRef = useRef<Map<string, AgentRun>>(new Map());
+
+  useEffect(() => {
+    const url = cfg.ui.logoUrl;
+    if (!url) return;
+    let cancelled = false;
+    void fetchLogoArt(url, 24, 6).then((art) => {
+      if (!cancelled) setHeaderLogo(art);
+    });
+    void fetchLogoArt(url, 60, 16).then((art) => {
+      if (!cancelled) setSplashLogo(art);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [cfg.ui.logoUrl]);
 
   useEffect(() => {
     return runManager.onChange(() => forceRender((n) => n + 1));
@@ -104,7 +122,7 @@ export function App({ cfg }: { cfg: CrewConfig }) {
   if (!snap) {
     return (
       <Box marginTop={1}>
-        <LoadingSplash label="reading agents, tracker, and worktree pool…" />
+        <LoadingSplash label="reading agents, tracker, and worktree pool…" logoArt={splashLogo} />
       </Box>
     );
   }
@@ -125,7 +143,7 @@ export function App({ cfg }: { cfg: CrewConfig }) {
 
   return (
     <Box flexDirection="column">
-      <Header snap={snap} />
+      <Header snap={snap} logoArt={headerLogo} />
       <AgentList rows={agentRows} runs={runsRef.current} selected={selected} />
       <Box marginTop={1}>
         <LogPanel lines={logLines} height={logHeight} />

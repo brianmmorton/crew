@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from "react";
-import { Text } from "ink";
+import { Box, Text } from "ink";
+import { Logo } from "./Logo.js";
+import type { LogoArt } from "./logoArt.js";
 
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const FRAME_MS = 80;
@@ -22,12 +24,20 @@ const WORDMARK = "crew";
  * real work (tracker counts, agent defs, pool state) so it earns something
  * more deliberate than a spinner alone.
  */
-export function LoadingSplash({ label }: { label: string }) {
+export function LoadingSplash({ label, logoArt }: { label: string; logoArt?: LogoArt | null }) {
   const [pos, setPos] = useState(0);
   useEffect(() => {
     const timer = setInterval(() => setPos((n) => (n + 1) % WORDMARK.length), 140);
     return () => clearInterval(timer);
   }, []);
+  if (logoArt) {
+    return (
+      <Box flexDirection="column">
+        <Logo art={logoArt} />
+        <Text dimColor>{label}</Text>
+      </Box>
+    );
+  }
   return (
     <Text>
       <Text bold>
