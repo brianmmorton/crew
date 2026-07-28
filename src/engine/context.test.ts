@@ -21,7 +21,7 @@ const item = {
   description: "details",
 } as WorkItem;
 
-const WT = "/main/checkout/.git/crew-worktrees/agent-abc-1";
+const WT = "/main/.crew-worktrees-checkout/agent-abc-1";
 
 test("the prompt states the worktree path the agent must work in", () => {
   const p = buildImplementerPrompt(cfg, "persona", "constitution", item, WT);

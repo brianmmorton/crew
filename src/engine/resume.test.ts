@@ -49,6 +49,8 @@ interface Sim {
   verifyOk?: boolean;
   /** Work found in the MAIN checkout — an agent that escaped its worktree. */
   stray?: { commits: string[]; dirtyFiles: string[] };
+  /** The user's own uncommitted work, present before the run starts. */
+  preexistingDirty?: string[];
 }
 
 interface Rec {
@@ -129,6 +131,7 @@ function harness(sim: Sim = {}) {
         return freshWt;
       },
       hasCommits: async () => sim.hasCommits ?? true,
+      checkoutSnapshot: async () => ({ head: "h0", dirty: sim.preexistingDirty ?? [] }),
       strayWork: async () => sim.stray ?? { commits: [], dirtyFiles: [] },
       noTouchViolations: async () => [],
       changedApps: async () => [],

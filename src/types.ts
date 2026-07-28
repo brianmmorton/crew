@@ -503,6 +503,17 @@ export interface ForgePort {
   commentOnPr(prUrl: string, body: string): Promise<void>;
 }
 
+/**
+ * A point-in-time view of the user's main checkout: its HEAD commit and the
+ * `git status --porcelain` lines present at that moment. Two of these bracket
+ * an agent run so the engine can attribute changes to the agent rather than to
+ * whatever the user already had in flight.
+ */
+export interface CheckoutSnapshot {
+  head: string;
+  dirty: string[];
+}
+
 export interface GitPort {
   /** Fetch + verify the base branch is reachable. */
   syncBase(): Promise<void>;
@@ -517,11 +528,18 @@ export interface GitPort {
   /** Any commits on the worktree ahead of origin/base? */
   hasCommits(worktreePath: string): Promise<boolean>;
   /**
-   * Work sitting in the MAIN checkout rather than a worktree — the signature of
-   * an agent that `cd`'d out of its sandbox. Diagnostic only; optional so
-   * alternative GitPort implementations need not provide it.
+   * HEAD + working-tree state of the MAIN checkout, taken before a run so
+   * `strayWork` can tell agent damage apart from the user's own in-progress
+   * work. Optional: alternative GitPort implementations need not provide it.
    */
-  strayWork?(): Promise<{ commits: string[]; dirtyFiles: string[] }>;
+  checkoutSnapshot?(): Promise<CheckoutSnapshot>;
+  /**
+   * What changed in the MAIN checkout since `before` — the signature of an
+   * agent that `cd`'d out of its sandbox. Compared against a snapshot rather
+   * than origin/base, because the user's checkout is normally on a feature
+   * branch with uncommitted work that is none of crew's business.
+   */
+  strayWork?(before: CheckoutSnapshot): Promise<{ commits: string[]; dirtyFiles: string[] }>;
   /** Which app dirs (keys of gates.verify) changed on the branch. */
   changedApps(worktreePath: string, appNames: string[]): Promise<string[]>;
   /** Files matching any noTouch glob that were modified (violations). */
