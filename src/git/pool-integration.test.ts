@@ -167,3 +167,17 @@ test("a pooled slot whose checkout was deleted underneath is rebuilt", async () 
   assert.ok(existsSync(join(again, "a.txt")), "the checkout is recreated cold");
   assert.equal(readMeta(poolDir, 0).state, "busy");
 });
+
+test("a blocking branch fails before a pool slot is consumed", async () => {
+  // Checked before acquireSlot: the branch can never be created, so claiming a
+  // slot would burn one and then fail anyway — and on a full pool that would
+  // starve real work behind a name that is never going to succeed.
+  const { git, poolDir, run } = repo({ max: 1, preserveArtifacts: [], recycleAfter: 0 });
+  run("branch", "agent");
+
+  await assert.rejects(
+    () => git.createWorktree("agent/abc-1"),
+    /you have a branch named `agent`/,
+  );
+  assert.equal(readMeta(poolDir, 0).state, "free", "the slot was never taken");
+});

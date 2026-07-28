@@ -101,3 +101,57 @@ test("findWorktree returns null when nothing exists at either location", async (
   const { git } = repo();
   assert.equal(await git.findWorktree("agent/nope"), null);
 });
+
+// --------------------- branch names blocked by a parent ---------------------
+
+/**
+ * Git stores refs as paths, so a branch named `agent` makes `agent/abc-1`
+ * impossible to create — `refs/heads/agent` is a file and the new ref needs it
+ * to be a directory. Git reports this as "cannot lock ref", naming the ref it
+ * failed to create rather than the branch that is in the way, which reads as a
+ * crew bug rather than a branch the user can rename.
+ */
+
+test("a branch that shadows the worktree namespace is reported clearly", async () => {
+  const { git, run } = repo();
+  run("branch", "agent");
+
+  await assert.rejects(
+    () => git.createWorktree("agent/abc-1"),
+    (e: Error) => {
+      assert.match(e.message, /you have a branch named `agent`/, "names the real culprit");
+      assert.match(e.message, /git branch -m agent/, "and how to fix it");
+      return true;
+    },
+  );
+});
+
+test("the blocking branch is found at any depth", async () => {
+  const { git, run } = repo();
+  run("branch", "crew/probe");
+  await assert.rejects(
+    () => git.createWorktree("crew/probe/verify"),
+    /you have a branch named `crew\/probe`/,
+  );
+});
+
+test("an unrelated branch of a similar name is not mistaken for a blocker", async () => {
+  const { git, run } = repo();
+  run("branch", "agent-other");
+  run("branch", "agents");
+  const wt = await git.createWorktree("agent/abc-1");
+  assert.ok(existsSync(wt), "neither is a path prefix of agent/abc-1");
+});
+
+test("a leftover branch of the exact name is deleted, not reported as a blocker", async () => {
+  const { git, run } = repo();
+  run("branch", "agent/abc-1"); // what a killed run leaves behind
+  const wt = await git.createWorktree("agent/abc-1");
+  assert.ok(existsSync(wt), "the existing-branch cleanup still applies");
+});
+
+test("a single-segment branch name has no prefix to be blocked by", async () => {
+  const { git } = repo();
+  const wt = await git.createWorktree("standalone");
+  assert.ok(existsSync(wt));
+});

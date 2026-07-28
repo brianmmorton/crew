@@ -134,6 +134,10 @@ export class GitAdapter implements GitPort {
   private async acquirePooled(branch: string): Promise<string> {
     const dir = this.worktreeRoot();
     const opts = this.pool!;
+    // Before claiming a slot: this branch name can never be created, so taking
+    // one would burn a slot and then fail anyway.
+    const blocker = await this.blockingBranch(branch);
+    if (blocker) throw this.blockedError(branch, blocker);
     const meta = acquireSlot(dir, opts, branch);
     const wt = slotPath(dir, meta.slot);
     const started = Date.now();
@@ -289,6 +293,45 @@ export class GitAdapter implements GitPort {
     return null;
   }
 
+  /**
+   * A branch that makes `branch` impossible to create, or null.
+   *
+   * Git stores refs as paths, so `refs/heads/crew` being a FILE means
+   * `refs/heads/crew/probe-verify` cannot be a directory. A user with a branch
+   * literally named `crew` (or `agent`) therefore blocks every worktree crew
+   * creates — and git reports it as "cannot lock ref", which names the ref it
+   * failed to create rather than the existing branch that is in the way.
+   */
+  private async blockingBranch(branch: string): Promise<string | null> {
+    const parts = branch.split("/");
+    // Every proper prefix: "a/b/c" is blocked by a branch named "a" or "a/b".
+    const prefixes = parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/"));
+    if (!prefixes.length) return null;
+    for (const p of prefixes) {
+      const found = await this.git([
+        "-C",
+        this.repoPath,
+        "show-ref",
+        "--verify",
+        "--quiet",
+        `refs/heads/${p}`,
+      ])
+        .then(() => true)
+        .catch(() => false);
+      if (found) return p;
+    }
+    return null;
+  }
+
+  /** Explain a ref collision in terms of the branch the user actually has. */
+  private blockedError(branch: string, blocker: string): Error {
+    return new Error(
+      `cannot create the branch \`${branch}\`: you have a branch named \`${blocker}\`, and git ` +
+        `cannot store a branch under a name that is already a branch itself. Rename or delete ` +
+        `\`${blocker}\` (e.g. \`git branch -m ${blocker} ${blocker}-wip\`), then try again.`,
+    );
+  }
+
   async createWorktree(branch: string): Promise<string> {
     if (this.pool) return this.acquirePooled(branch);
 
@@ -313,6 +356,11 @@ export class GitAdapter implements GitPort {
     // the executor only calls this when findWorktree() found nothing resumable
     // — a preserved worktree holding a real commit never reaches here.
     await this.git(["-C", this.repoPath, "branch", "-D", branch]).catch(() => {});
+
+    // Checked after the cleanup above, so a leftover `agent/ABC-1` from a prior
+    // run is deleted rather than reported as a blocker.
+    const blocker = await this.blockingBranch(branch);
+    if (blocker) throw this.blockedError(branch, blocker);
 
     await this.git([
       "-C",
