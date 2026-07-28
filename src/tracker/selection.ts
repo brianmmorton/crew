@@ -14,9 +14,17 @@ const EXECUTABLE_TYPES: ReadonlySet<ItemType> = new Set<ItemType>([
  * `requireLabels`: a "blocked" item stays blocked however else it's tagged.
  */
 export function passesLabelFilter(item: WorkItem, cfg: CrewConfig): boolean {
+  const labels = new Set(item.labels);
+
+  // Unconditional, and deliberately not expressed as a default in
+  // `excludeLabels`: a user who sets that list would silently overwrite the
+  // default and put the executor back on work that asked for a person. This
+  // has to be a guarantee, not a preference.
+  const needsHuman = cfg.tracker.labels?.needsHuman;
+  if (needsHuman && labels.has(needsHuman)) return false;
+
   const gate = cfg.tracker.executable;
   if (!gate) return true;
-  const labels = new Set(item.labels);
   if (gate.excludeLabels?.some((l) => labels.has(l))) return false;
   if (gate.requireLabels?.length && !gate.requireLabels.some((l) => labels.has(l))) {
     return false;

@@ -279,6 +279,35 @@ export class LinearAdapter implements TrackerPort {
     await this.client.updateIssue(issueId, { assigneeId: userId });
   }
 
+  async setLabels(
+    issueId: string,
+    change: { add?: string[]; remove?: string[] },
+  ): Promise<void> {
+    this.ensureMeta();
+    const add = change.add?.filter((l) => l.trim()) ?? [];
+    const remove = new Set(change.remove?.filter((l) => l.trim()) ?? []);
+    if (!add.length && !remove.size) return;
+
+    // Linear's updateIssue replaces the label set outright, so the current
+    // labels have to be read first — anything else would drop the type and
+    // agent labels the item was created with.
+    const issue = await this.client.issue(issueId);
+    const current = await issue.labels();
+
+    const keep: string[] = [];
+    for (const l of current.nodes) {
+      if (!remove.has(l.name) && !keep.includes(l.id)) keep.push(l.id);
+    }
+    for (const name of new Set(add)) {
+      const id = await this.ensureLabelId(name);
+      // Distinct names can resolve to one id (Linear names are
+      // case-insensitive), and a repeated id fails the whole mutation.
+      if (!keep.includes(id)) keep.push(id);
+    }
+
+    await this.client.updateIssue(issueId, { labelIds: keep });
+  }
+
   async createIssue(
     proposal: Proposal,
     opts: {

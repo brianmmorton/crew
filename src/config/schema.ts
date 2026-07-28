@@ -21,6 +21,18 @@ export const trackerSchema = z.object({
       bug: z.string().default("type:bug"),
       task: z.string().default("type:task"),
       chore: z.string().default("type:chore-dx"),
+      /**
+       * Applied when a cycle failed in a way the next cycle can pick up from —
+       * the item returns to the ready state carrying this, and the executor
+       * resumes its preserved worktree instead of starting over.
+       */
+      stuck: z.string().default("crew:stuck"),
+      /**
+       * Applied when work needs a person. Recovery never touches these, so the
+       * label is also listed in `executable.excludeLabels` by default: it has
+       * to keep the executor off the item, not just annotate it.
+       */
+      needsHuman: z.string().default("crew:needs-human"),
     })
     .default({}),
   statuses: z

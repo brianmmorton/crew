@@ -255,7 +255,12 @@ export interface TrackerConfig {
    * component name — issues crew creates get it, and queries filter on it.
    */
   project?: string;
-  labels: Record<"prd" | "bug" | "task" | "chore", string>;
+  /**
+   * The four `type:*` labels, plus the two lifecycle labels a failed cycle
+   * applies: `stuck` (resumable — the executor picks it back up) and
+   * `needsHuman` (never auto-resumed; see `passesLabelFilter`).
+   */
+  labels: Record<"prd" | "bug" | "task" | "chore" | "stuck" | "needsHuman", string>;
   statuses: {
     backlog: string;
     ready: string;
@@ -461,6 +466,20 @@ export interface TrackerPort {
 
   /** Assign (userId) or unassign (null). */
   assign(issueId: string, userId: string | null): Promise<void>;
+
+  /**
+   * Add and/or remove labels on an existing issue, creating any that don't
+   * exist yet. This is how a failed cycle records *why* it stopped somewhere a
+   * human can see it — and how the next cycle knows the item is a resume rather
+   * than a fresh start.
+   *
+   * Both lists are name-based and idempotent: adding a label the issue already
+   * carries, or removing one it doesn't, is a no-op rather than an error.
+   */
+  setLabels(
+    issueId: string,
+    change: { add?: string[]; remove?: string[] },
+  ): Promise<void>;
 
   /** Create an issue from a proposal; returns the created WorkItem. */
   createIssue(

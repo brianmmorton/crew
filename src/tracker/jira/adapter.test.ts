@@ -536,3 +536,70 @@ test("explainEmptySelection counts ready items without the label clause", async 
   assert.equal(r?.ready, 2);
   assert.equal(r?.passedGate, 1);
 });
+
+// ------------------------------- setLabels ----------------------------------
+
+/**
+ * Jira has no add/remove label call — the whole array is replaced — so the
+ * current labels must be read first. Dropping them would strip the type label
+ * that makes an item executable at all.
+ */
+
+test("setLabels merges onto the issue's existing labels", async () => {
+  const { adapter, calls } = primed({
+    "GET /issue/BRI-1": { id: "1", key: "BRI-1", fields: { labels: ["type:task", "keep-me"] } },
+  });
+  await adapter.setLabels("BRI-1", { add: ["crew:stuck"] });
+
+  const put = calls.find((c) => c.method === "PUT");
+  assert.deepEqual(put?.body, { fields: { labels: ["type:task", "keep-me", "crew:stuck"] } });
+});
+
+test("setLabels removes only what was asked for", async () => {
+  const { adapter, calls } = primed({
+    "GET /issue/BRI-1": {
+      id: "1",
+      key: "BRI-1",
+      fields: { labels: ["type:task", "crew:stuck"] },
+    },
+  });
+  await adapter.setLabels("BRI-1", { add: ["crew:needs-human"], remove: ["crew:stuck"] });
+
+  const put = calls.find((c) => c.method === "PUT");
+  assert.deepEqual(put?.body, { fields: { labels: ["type:task", "crew:needs-human"] } });
+});
+
+test("setLabels does not write when nothing would change", async () => {
+  const { adapter, calls } = primed({
+    "GET /issue/BRI-1": { id: "1", key: "BRI-1", fields: { labels: ["type:task"] } },
+  });
+  // Adding a label it already has, removing one it doesn't.
+  await adapter.setLabels("BRI-1", { add: ["type:task"], remove: ["crew:stuck"] });
+  assert.equal(calls.some((c) => c.method === "PUT"), false, "no pointless API call");
+});
+
+test("setLabels is a no-op when both lists are empty", async () => {
+  const { adapter, calls } = primed({});
+  await adapter.setLabels("BRI-1", {});
+  assert.deepEqual(calls, [], "must not even read the issue");
+});
+
+test("setLabels replaces spaces, which Jira rejects in a label", async () => {
+  const { adapter, calls } = primed({
+    "GET /issue/BRI-1": { id: "1", key: "BRI-1", fields: { labels: [] } },
+  });
+  await adapter.setLabels("BRI-1", { add: ["needs human"] });
+
+  const put = calls.find((c) => c.method === "PUT");
+  assert.deepEqual(put?.body, { fields: { labels: ["needs-human"] } });
+});
+
+test("setLabels tolerates an issue with no labels field", async () => {
+  const { adapter, calls } = primed({
+    "GET /issue/BRI-1": { id: "1", key: "BRI-1", fields: {} },
+  });
+  await adapter.setLabels("BRI-1", { add: ["crew:stuck"] });
+
+  const put = calls.find((c) => c.method === "PUT");
+  assert.deepEqual(put?.body, { fields: { labels: ["crew:stuck"] } });
+});

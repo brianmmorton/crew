@@ -4,24 +4,33 @@ import { implementerCycle, type CycleOutcome } from "./cycles.js";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/**
+ * How many consecutive lost claim races before the loop backs off to its normal
+ * poll interval. Retrying immediately is right when a sibling worker just beat
+ * us to one item; spinning is wrong when every item on the board is taken.
+ */
+const MAX_CONTENDED_RUN = 5;
+
 // Interruptible sleep: wakeExecutor() resolves the current one early, so a
 // hotkey ("run implementer now") can skip the idle poll wait.
-let wake: (() => void) | null = null;
+//
+// A Set rather than a single slot: with implementerWorkers > 1 several workers
+// sleep concurrently, and a single slot would leave all but the last one
+// waiting out the full interval after a hotkey.
+const waiters = new Set<() => void>();
 function sleepInterruptible(ms: number): Promise<void> {
   return new Promise<void>((res) => {
-    const t = setTimeout(() => {
-      wake = null;
-      res();
-    }, ms);
-    wake = () => {
+    const done = () => {
       clearTimeout(t);
-      wake = null;
+      waiters.delete(done);
       res();
     };
+    const t = setTimeout(done, ms);
+    waiters.add(done);
   });
 }
 export function wakeExecutor(): void {
-  wake?.();
+  for (const w of [...waiters]) w();
 }
 
 let paused = false;
@@ -32,7 +41,20 @@ export function setPaused(p: boolean): void {
 let stopped = false;
 export function requestStop(): void {
   stopped = true;
-  wake?.();
+  wakeExecutor();
+}
+
+/**
+ * Clear a previous run's stop, so `runExecutorLoop` can be called again in the
+ * same process (the CLI does; tests certainly do).
+ *
+ * Deliberately NOT done inside `runExecutorLoop`: the supervisor installs its
+ * signal handlers before calling it, and a SIGINT arriving in that window must
+ * still stop the loop rather than be erased. Callers that genuinely want a
+ * fresh start say so.
+ */
+export function resetStop(): void {
+  stopped = false;
 }
 
 let lastIdleLog = 0;
@@ -52,30 +74,30 @@ export function setIdleHandler(h: ((idleMs: number, backlog: number) => void) | 
  * the severity it deserves, so scanning the log for "what happened to that
  * ticket" never comes up empty — and a failed cycle never reads as a success.
  */
-function logCycleOutcome(outcome: CycleOutcome, logger: Logger): void {
+function logCycleOutcome(outcome: CycleOutcome, logger: Logger, tag = ""): void {
   const detail = outcome.detail ? ` — ${outcome.detail}` : "";
   switch (outcome.status) {
     case "pr-opened":
-      logger.info(`cycle finished: PR opened${outcome.url ? ` → ${outcome.url}` : ""}`);
+      logger.info(`${tag}cycle finished: PR opened${outcome.url ? ` → ${outcome.url}` : ""}`);
       return;
     case "no-commit":
       logger.warn(
-        `cycle finished: the agent made no commit; the item was returned to the backlog${detail}`,
+        `${tag}cycle finished: the agent made no commit; the item was returned to the backlog${detail}`,
       );
       return;
     case "rejected":
-      logger.warn(`cycle finished: rejected by the no-touch gate${detail}`);
+      logger.warn(`${tag}cycle finished: rejected by the no-touch gate${detail}`);
       return;
     case "verify-failed":
-      logger.warn(
-        `cycle finished: the verify gate failed; the item was returned to the backlog${detail}`,
-      );
+      // Not necessarily a demote any more: the first failure keeps the commit
+      // and hands it back to the agent to fix.
+      logger.warn(`${tag}cycle finished: the verify gate failed${detail}`);
       return;
     case "error":
-      logger.error(`cycle finished: error${detail}`);
+      logger.error(`${tag}cycle finished: error${detail}`);
       return;
     default:
-      logger.info(`cycle finished: ${outcome.status}${detail}`);
+      logger.info(`${tag}cycle finished: ${outcome.status}${detail}`);
   }
 }
 
@@ -101,32 +123,101 @@ export async function runExecutorLoop(
   ports: Ports,
   logger: Logger,
 ): Promise<void> {
+  const workers = Math.max(1, cfg.budget.implementerWorkers ?? 1);
   logger.info("crew executor loop started", {
     project: cfg.project,
     wipCap: cfg.gates.wipCap,
+    workers,
   });
+  if (workers > 1 && !cfg.worktrees.reuse) {
+    // Without pooling each cycle creates its own worktree, so N workers means N
+    // concurrent full checkouts of the repo. That is legal but rarely intended.
+    logger.warn(
+      `implementerWorkers=${workers} with worktrees.reuse off: every worker creates its own ` +
+        `checkout. Set worktrees.reuse: true to share a bounded pool instead.`,
+    );
+  }
 
-  // When the current dry spell started, or null if the executor isn't idle.
-  // Paused and WIP-capped are deliberately *not* idle: there is work, it just
-  // isn't runnable right now, and proposing more wouldn't help.
-  let idleSince: number | null = null;
+  // Module-level, so reset per run rather than inheriting a previous loop's
+  // counts (the CLI runs this more than once in a process, and tests certainly do).
+  // `stopped` is deliberately NOT reset: the supervisor installs its signal
+  // handlers before calling this, and a SIGINT in that window must still stop
+  // the loop rather than be erased here.
+  idleSince = null;
+  idleWorkers = 0;
+
+  // Workers are symmetric and coordinate through the per-item claim, so the
+  // only shared state is the idle bookkeeping below — which must stay single,
+  // or N workers would each report a dry spell and fire N idle proposers.
+  await Promise.all(
+    Array.from({ length: workers }, (_, i) => runWorker(cfg, ports, logger, i, workers)),
+  );
+  logger.info("crew executor loop stopped");
+}
+
+/** When the executor as a whole went dry, or null while any worker has work. */
+let idleSince: number | null = null;
+/** Workers currently reporting idle; a dry spell needs all of them. */
+let idleWorkers = 0;
+
+/** One executor worker. Several run concurrently when implementerWorkers > 1. */
+async function runWorker(
+  cfg: CrewConfig,
+  ports: Ports,
+  logger: Logger,
+  index: number,
+  total: number,
+): Promise<void> {
+  /** Prefix so interleaved output is attributable when several workers run. */
+  const tag = total > 1 ? `w${index}: ` : "";
+  /** Consecutive ticks that lost the claim race; reset by any real outcome. */
+  let contended = 0;
+  /** Whether THIS worker is currently counted in `idleWorkers`. */
+  let countedIdle = false;
+  const notIdle = () => {
+    if (countedIdle) {
+      countedIdle = false;
+      idleWorkers--;
+    }
+    idleSince = null;
+  };
 
   while (!stopped) {
     try {
       if (paused) {
-        idleSince = null;
+        notIdle();
         await sleepInterruptible(cfg.budget.pollSeconds * 1000);
         continue;
       }
 
       const inProgress = await ports.tracker.countInProgress();
       if (inProgress >= cfg.gates.wipCap) {
-        idleSince = null;
+        notIdle();
         await sleepInterruptible(cfg.budget.pollSeconds * 1000);
         continue;
       }
 
       const outcome = await implementerCycle(cfg, ports, logger);
+
+      if (outcome.status === "contended") {
+        // Another worker took this item. There is work on the board, so don't
+        // sleep out a poll interval — come straight back for the next one. The
+        // short pause keeps a pathological case (every item claimed, all of
+        // them losing) from becoming a hot loop against the tracker.
+        notIdle();
+        contended++;
+        if (contended >= MAX_CONTENDED_RUN) {
+          logger.info(
+            `every item offered was already claimed (${contended} in a row); waiting a tick`,
+          );
+          contended = 0;
+          await sleepInterruptible(cfg.budget.pollSeconds * 1000);
+        } else {
+          await sleep(250);
+        }
+        continue;
+      }
+      contended = 0;
 
       if (outcome.status === "usage-limited") {
         const ms = backoffMs(outcome.resetAt, cfg.budget.backoffMinutes);
@@ -136,11 +227,19 @@ export async function runExecutorLoop(
         // Not idle — we're rate-limited, and there may well be work waiting.
         // Leaving idleSince set would make the long sleep look like a dry spell
         // and fire every idle proposer the moment the window reopens.
-        idleSince = null;
+        notIdle();
         await sleep(ms); // not interruptible: waking would just re-hit the limit
       } else if (outcome.status === "idle") {
         const now = Date.now();
-        if (idleSince === null) idleSince = now;
+        if (!countedIdle) {
+          countedIdle = true;
+          idleWorkers++;
+        }
+        // The dry spell starts only when EVERY worker has run out of work —
+        // otherwise one worker finishing early would report the team as idle
+        // while its siblings are still implementing.
+        const allIdle = idleWorkers >= total;
+        if (allIdle && idleSince === null) idleSince = now;
 
         let backlog = 0;
         try {
@@ -150,7 +249,9 @@ export async function runExecutorLoop(
         }
 
         // Explain the idle, throttled to ~5 min, so it's never a silent mystery.
-        if (now - lastIdleLog > 5 * 60 * 1000) {
+        // Only once the whole team is dry, and `lastIdleLog` is module-level so
+        // N workers share one throttle rather than each logging its own.
+        if (allIdle && now - lastIdleLog > 5 * 60 * 1000) {
           lastIdleLog = now;
 
           // A label gate that rejects everything looks identical to an empty
@@ -184,15 +285,15 @@ export async function runExecutorLoop(
           }
         }
 
-        onIdle?.(now - idleSince, backlog);
+        if (allIdle && idleSince !== null) onIdle?.(now - idleSince, backlog);
         await sleepInterruptible(cfg.budget.pollSeconds * 1000);
       } else {
         // Real work happened, so the next dry spell is a fresh one. "Work
         // happened" is not the same as "work succeeded" — a rejected or
         // verify-failed cycle lands here too, so state the outcome plainly
         // rather than letting a failure look like a quiet success.
-        idleSince = null;
-        logCycleOutcome(outcome, logger);
+        notIdle();
+        logCycleOutcome(outcome, logger, tag);
         await sleep(2000); // did work; brief pause before the next claim
       }
     } catch (e) {

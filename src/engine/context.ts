@@ -14,8 +14,38 @@ export function buildImplementerPrompt(
   constitution: string,
   item: WorkItem,
   worktree?: string,
+  /**
+   * Set on a fix-forward run: the previous attempt committed, but the verify
+   * gate rejected it. The agent is looking at its own code and the output that
+   * rejected it, which is a far cheaper route to green than starting over.
+   */
+  verifyFailure?: string,
 ): string {
   const noTouch = cfg.gates.noTouch.map((g) => `  - ${g}`).join("\n");
+  const fixing = verifyFailure
+    ? `
+
+# You are fixing a failed verification (read this first)
+
+You already implemented this task in this worktree and committed it, but the
+verify gate rejected that commit. Your job now is NOT to start over — the
+existing commit is your work, and most of it is probably fine.
+
+Here is the output that rejected it:
+
+\`\`\`
+${tail(verifyFailure)}
+\`\`\`
+
+- Read the failure above and fix the underlying cause in this worktree.
+- Amend your existing commit (\`git commit --amend\`) rather than adding a second
+  one. The runner expects exactly one commit on this branch.
+- Re-run the affected app's verify script yourself and confirm it passes before
+  you finish.
+- If the failure is not something you can fix — the task as specified cannot
+  pass verification — make no further commit and say so plainly in your final
+  message, rather than committing something that still fails.`
+    : "";
   const where = worktree
     ? `
 
@@ -36,7 +66,7 @@ write and EVERY command you run must be inside it.
   ${worktree}. If a command needs an explicit directory, use that.
 - Committing anywhere else corrupts the user's checkout and loses your work.`
     : "";
-  return `${personaPrompt}${where}
+  return `${personaPrompt}${where}${fixing}
 
 # The task you are implementing
 
@@ -58,7 +88,11 @@ ${constitution}
 - Follow the repo's AGENTS.md for verification commands, conventions, and the pre-commit hook — but NOT for directory paths. Run everything in your worktree${worktree ? ` (${worktree})` : ""}.
 - Never modify these protected paths:
 ${noTouch}
-- Make exactly ONE atomic commit (git add + git commit) with a Conventional-Commits subject, or make NO commit if you cannot complete the task cleanly and verifiably.
+- ${
+    verifyFailure
+      ? "Amend your EXISTING commit (git add + git commit --amend) so the branch still holds exactly one commit, or make no further commit if you cannot make it pass."
+      : "Make exactly ONE atomic commit (git add + git commit) with a Conventional-Commits subject, or make NO commit if you cannot complete the task cleanly and verifiably."
+  }
 - Everything you change must pass the affected app's verify script before you commit.
 `;
 }

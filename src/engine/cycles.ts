@@ -22,7 +22,20 @@ import { withHeartbeat } from "../util/heartbeat.js";
 import { writeRunLog } from "../util/runlog.js";
 import { style } from "../util/color.js";
 import { agentsOfKind, executorFor } from "../agent/agents.js";
-import { MAX_RESUME_ATTEMPTS, resumeAttempts, setResumeAttempts } from "../util/state.js";
+import {
+  MAX_RESUME_ATTEMPTS,
+  MAX_VERIFY_ATTEMPTS,
+  resumeAttempts,
+  setResumeAttempts,
+  setVerifyAttempts,
+  verifyAttempts,
+} from "../util/state.js";
+import {
+  clearVerifyFailure,
+  readVerifyFailure,
+  writeVerifyFailure,
+} from "../util/verifyfail.js";
+import { acquireClaim, releaseClaim } from "./claim.js";
 import type { Complexity, CrewConfig as _Cfg } from "../types.js";
 
 /** How long to wait for a pooled worktree slot before giving the item back. */
@@ -146,6 +159,8 @@ export function enforceLimits(
 
 export type CycleStatus =
   | "idle"
+  /** Another worker holds the item. There IS work — just not for us. */
+  | "contended"
   | "pr-opened"
   | "no-commit"
   | "rejected"
@@ -177,6 +192,35 @@ export async function implementerCycle(
   const item = await ports.tracker.selectNextExecutable();
   if (!item) return { status: "idle" };
 
+  // Claim the ticket before touching it. `selectNextExecutable` is a
+  // read-then-write against a tracker with no compare-and-set, so two workers
+  // can return the same item; the claim decides which one actually works it.
+  // Losing is normal, not an error — but it is NOT idle either: there is work,
+  // this worker just isn't the one doing it, so the loop should come straight
+  // back rather than sleeping out a poll interval.
+  if (!acquireClaim(cfg.configDir, item.identifier)) {
+    logger.info(`${item.identifier}: claimed by another worker; skipping`);
+    return { status: "contended", detail: item.identifier };
+  }
+
+  try {
+    return await workClaimedItem(cfg, ports, item, logger);
+  } finally {
+    releaseClaim(cfg.configDir, item.identifier);
+  }
+}
+
+/**
+ * The body of one executor cycle, for an item this worker holds the claim on.
+ * Split from `implementerCycle` purely so the claim's release is a single
+ * `finally` around every exit path, including the throwing ones.
+ */
+async function workClaimedItem(
+  cfg: CrewConfig,
+  ports: Ports,
+  item: WorkItem,
+  logger: Logger,
+): Promise<CycleOutcome> {
   const all = Object.values(ports.agents);
   const exec = executorFor(all, item.labels);
   if (!exec) {
@@ -202,9 +246,51 @@ export async function implementerCycle(
    */
   let preserve: string | null = null;
   /**
+   * On a fix-forward run, the verify output that rejected the existing commit.
+   * Null on a fresh run. Drives both the prompt and whether a worktree is
+   * acquired — a fix-forward reuses the one already holding the work.
+   */
+  let fixing: string | null = null;
+
+  // Lifecycle labels are optional in practice: a config predating them, or a
+  // tracker adapter without label support, must still run the cycle. An unset
+  // name simply means that mark is not applied.
+  const L: Partial<Record<"stuck" | "needsHuman", string>> = cfg.tracker.labels ?? {};
+  /**
+   * Record the cycle's disposition on the tracker. This is what makes a failure
+   * visible to a person on the board rather than only in a log line, and what
+   * tells the next cycle whether an item is resumable.
+   *
+   * Never fatal: the work itself already succeeded or failed on its own terms,
+   * and losing the annotation must not also lose the outcome.
+   */
+  const label = async (
+    add: (string | undefined)[],
+    remove: (string | undefined)[] = [],
+  ) => {
+    const names = (xs: (string | undefined)[]) => xs.filter((x): x is string => !!x);
+    const [a, r] = [names(add), names(remove)];
+    if (!a.length && !r.length) return;
+    await ports.tracker
+      .setLabels?.(item.id, { add: a, remove: r })
+      .catch((e) =>
+        logger.warn(`${item.identifier}: could not update labels`, { error: String(e) }),
+      );
+  };
+  /** Mark resumable: the next cycle continues from the preserved worktree. */
+  const markStuck = () => label([L.stuck]);
+  /** Mark as needing a person. Recovery skips these permanently. */
+  const markNeedsHuman = () => label([L.needsHuman], [L.stuck]);
+  /** Clear both lifecycle labels — the item is healthy again. */
+  const clearMarks = () => label([], [L.stuck, L.needsHuman]);
+
+  /**
    * Send an item back to the backlog with an explanation. The same explanation
    * goes to the log as a warning: a demote is always a failure, and reading the
    * tracker comment should never be the only way to find out why.
+   *
+   * A demote is a fresh start — the worktree is discarded — so any `stuck` mark
+   * from an earlier attempt is cleared with it.
    */
   const demote = async (reason: string, note: string) => {
     logger.warn(`${exec.name} ${item.identifier}: ${reason} — returning to "${S.backlog}"`);
@@ -213,16 +299,64 @@ export async function implementerCycle(
     }
     await ports.tracker.addComment(item.id, `crew: ${note}`);
     await ports.tracker.transition(item.id, S.backlog);
+    await clearMarks();
+    // A demote discards the worktree, so any pending fix-forward record would
+    // otherwise outlive the commit it describes and mis-route the next cycle.
+    clearVerifyFailure(cfg.configDir, item.identifier);
   };
 
   try {
     await ports.git.syncBase();
 
+    const existing = await ports.git.findWorktree(branch);
+    const hasExisting = !!existing && (await ports.git.hasCommits(existing).catch(() => false));
+
+    // Fix-forward path: the previous attempt committed but failed verification.
+    // The commit is NOT good, so this re-runs the agent against its own code
+    // and the output that rejected it — much cheaper than starting over, and
+    // the failing test is exactly the input needed to fix it.
+    const pendingFix = hasExisting ? readVerifyFailure(cfg.configDir, item.identifier) : null;
+    if (existing && pendingFix) {
+      const tries = verifyAttempts(cfg.configDir, item.identifier) + 1;
+      // Normally the verify gate below spends the last attempt and demotes
+      // there, so this is a backstop rather than the usual exit: it catches a
+      // counter left at the cap by a cycle that died before reaching the gate
+      // (or by a hand-edited state file), which would otherwise re-run the
+      // agent forever.
+      if (tries > MAX_VERIFY_ATTEMPTS) {
+        logger.error(
+          `${item.identifier}: giving up after ${MAX_VERIFY_ATTEMPTS} attempt(s) to fix the failing ` +
+            `verify; discarding the worktree`,
+        );
+        setVerifyAttempts(cfg.configDir, item.identifier, 0);
+        clearVerifyFailure(cfg.configDir, item.identifier);
+        await ports.git.removeWorktree(existing).catch(() => {});
+        await demote(
+          `exhausted ${MAX_VERIFY_ATTEMPTS} attempt(s) to fix a failing verify`,
+          `verification still failed after ${MAX_VERIFY_ATTEMPTS} fix attempt(s); the work was ` +
+            `discarded.\n\n\`\`\`\n${tail(pendingFix, 1500)}\n\`\`\``,
+        );
+        return { status: "verify-failed", detail: "verify fix attempts exhausted" };
+      }
+
+      setVerifyAttempts(cfg.configDir, item.identifier, tries);
+      logger.info(
+        `${item.identifier}: re-running the agent to fix a failed verify ` +
+          `(attempt ${tries}/${MAX_VERIFY_ATTEMPTS})`,
+      );
+      // Reuse the worktree in place — its commit is what the agent repairs —
+      // and fall through to the shared implement-and-gate flow below.
+      wt = existing;
+      fixing = pendingFix;
+    }
+
     // Resume path: a previous cycle committed and verified this item but failed
     // to push or open the PR. The commit is already good, so retry just the
     // plumbing — no agent run, no tokens.
-    const existing = await ports.git.findWorktree(branch);
-    if (existing && (await ports.git.hasCommits(existing).catch(() => false))) {
+    // `!fixing` matters: a fix-forward worktree also has a commit, but that
+    // commit is the one verification rejected. Landing it would push work the
+    // gate already refused.
+    if (existing && hasExisting && !fixing) {
       const attempts = resumeAttempts(cfg.configDir, item.identifier) + 1;
       if (attempts > MAX_RESUME_ATTEMPTS) {
         logger.error(
@@ -250,18 +384,31 @@ export async function implementerCycle(
       if (out.status === "pr-opened") {
         setResumeAttempts(cfg.configDir, item.identifier, 0);
         preserve = null;
+        await clearMarks(); // landed at last — no longer stuck
       }
       return out;
     }
 
-    wt = await acquireWorktree(ports, branch, item.identifier, logger);
+    // A fix-forward already has its worktree (and its pool slot); only a fresh
+    // run needs to claim one.
+    if (!wt) wt = await acquireWorktree(ports, branch, item.identifier, logger);
+    // Hold a fix-forward worktree through the run: dropping it on a failure
+    // would discard the very commit the agent was asked to repair.
+    if (fixing) preserve = wt;
 
     // Baseline of the user's checkout, taken immediately before the agent runs.
     // The user is normally on a feature branch with their own uncommitted work,
     // so only a change relative to THIS is attributable to the agent.
     const before = await ports.git.checkoutSnapshot?.().catch(() => null);
 
-    const prompt = buildImplementerPrompt(cfg, exec.prompt, ports.constitution, item, wt);
+    const prompt = buildImplementerPrompt(
+      cfg,
+      exec.prompt,
+      ports.constitution,
+      item,
+      wt,
+      fixing ?? undefined,
+    );
     const model = modelForComplexity(cfg, item.complexity, exec);
     logger.info(
       `${exec.name} ${item.identifier}: working (complexity=${item.complexity ?? "?"}, model=${model ?? "default"})…`,
@@ -319,6 +466,7 @@ export async function implementerCycle(
           `crew: the agent committed outside its worktree — ${what} are in the main checkout ` +
             `(${cfg.repo.path}) instead of on \`${branch}\`. Nothing was discarded; this needs a human.`,
         );
+        await markNeedsHuman();
         return { status: "error", detail: "agent worked outside its worktree" };
       }
 
@@ -351,31 +499,69 @@ export async function implementerCycle(
       verify.output,
     );
     if (!verify.ok) {
-      await demote(
-        "verify gate failed",
-        `verification failed.\n\n\`\`\`\n${tail(verify.output)}\n\`\`\``,
-      );
       if (verifyLog) logger.warn(`${item.identifier}: full verify output → ${verifyLog}`);
+      const spent = verifyAttempts(cfg.configDir, item.identifier);
+      if (spent >= MAX_VERIFY_ATTEMPTS) {
+        // Out of fix attempts: fall back to the original behaviour — discard
+        // the work and put the item back for a human or a fresh start.
+        setVerifyAttempts(cfg.configDir, item.identifier, 0);
+        clearVerifyFailure(cfg.configDir, item.identifier);
+        // Release the hold taken for the fix-forward run, or the `finally` would
+        // retain this slot forever on the one path that gives up on the work.
+        preserve = null;
+        await demote(
+          "verify gate failed",
+          `verification failed.\n\n\`\`\`\n${tail(verify.output)}\n\`\`\``,
+        );
+        return { status: "verify-failed", detail: tail(verify.output, 400) };
+      }
+
+      // Keep the commit and the failure that rejected it, so the next cycle can
+      // hand both back to the agent instead of paying for a fresh run.
+      writeVerifyFailure(cfg.configDir, item.identifier, verify.output);
+      preserve = wt;
+      logger.warn(
+        `${exec.name} ${item.identifier}: verify gate failed — keeping the worktree so the agent ` +
+          `can fix it (attempt ${spent + 1}/${MAX_VERIFY_ATTEMPTS} next cycle)`,
+      );
+      await ports.tracker.addComment(
+        item.id,
+        `crew: verification failed; the agent will attempt a fix.\n\n\`\`\`\n${tail(verify.output, 1500)}\n\`\`\``,
+      );
+      await ports.tracker.transition(item.id, S.ready);
+      await ports.tracker.assign(item.id, null);
+      await markStuck();
       return { status: "verify-failed", detail: tail(verify.output, 400) };
     }
     logger.info(
       `${exec.name} ${item.identifier}: verify gate passed` +
         (verifyLog ? ` (output → ${verifyLog})` : ""),
     );
+    // Green — any earlier fix-forward state is spent.
+    clearVerifyFailure(cfg.configDir, item.identifier);
+    setVerifyAttempts(cfg.configDir, item.identifier, 0);
 
     // From here the commit is verified, so any failure preserves the worktree.
     preserve = wt;
     const out = await landCommit(cfg, ports, exec, item, wt, branch, logger);
-    if (out.status === "pr-opened") preserve = null;
+    if (out.status === "pr-opened") {
+      preserve = null;
+      await clearMarks();
+    }
     return out;
   } catch (e) {
     logger.error(`${exec.name} cycle error on ${item.identifier}`, { error: String(e) });
     // A verified commit exists but something after it blew up — keep the
     // worktree so the next cycle can retry landing it.
-    if (wt && (await ports.git.hasCommits(wt).catch(() => false))) preserve = wt;
+    const resumable = !!wt && (await ports.git.hasCommits(wt).catch(() => false));
+    if (resumable) preserve = wt as string;
     try {
       await ports.tracker.transition(item.id, S.ready);
       await ports.tracker.assign(item.id, null);
+      // Back in the ready state, so `selectNextExecutable` finds it again. The
+      // label is what tells the next cycle this is a resume: without it, an
+      // item that returns to ready looks identical to fresh work.
+      if (resumable) await markStuck();
     } catch {
       /* best effort */
     }

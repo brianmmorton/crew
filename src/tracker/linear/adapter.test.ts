@@ -265,3 +265,85 @@ test("explainEmptySelection queries ready items without the label filter", async
   assert.ok(!("and" in filters[0]), "diagnostic query must not carry the gate");
   assert.deepEqual(filters[0].state, { name: { eq: "Todo" } });
 });
+
+// ------------------------------- setLabels ----------------------------------
+
+/**
+ * Linear's updateIssue replaces the label set outright, so setLabels has to
+ * read the current labels and merge. Getting this wrong strips the type label
+ * an item needs to stay executable — and the same id-dedupe rule as createIssue
+ * applies, since a repeated id fails the whole mutation.
+ */
+
+/** Fake client whose issue already carries `existing` labels. */
+function labelAdapter(existing: { id: string; name: string }[], opts: { caseInsensitive?: boolean } = {}) {
+  const captured: { labelIds?: string[] } = {};
+  const ids = new Map<string, string>(existing.map((l) => [opts.caseInsensitive ? l.name.toLowerCase() : l.name, l.id]));
+  const key = (n: string) => (opts.caseInsensitive ? n.toLowerCase() : n);
+
+  const adapter = new LinearAdapter("key", cfg) as unknown as {
+    meta: unknown;
+    client: unknown;
+    setLabels: LinearAdapter["setLabels"];
+  };
+  adapter.meta = { teamId: "T", myUserId: "U", labelIds: {}, stateIds: {} };
+  adapter.client = {
+    issue: async () => ({ labels: async () => ({ nodes: existing }) }),
+    createIssueLabel: async ({ name }: { name: string }) => {
+      const k = key(name);
+      if (!ids.has(k)) ids.set(k, `lbl-new-${ids.size + 1}`);
+      return { issueLabel: Promise.resolve({ id: ids.get(k) }) };
+    },
+    updateIssue: async (_id: string, input: { labelIds?: string[] }) => {
+      captured.labelIds = input.labelIds;
+    },
+  };
+  return { adapter, captured };
+}
+
+test("setLabels keeps the issue's existing labels when adding one", async () => {
+  const { adapter, captured } = labelAdapter([{ id: "l-task", name: "type:task" }]);
+  await adapter.setLabels("i1", { add: ["crew:stuck"] });
+  assert.equal(captured.labelIds?.length, 2);
+  assert.ok(captured.labelIds?.includes("l-task"), "type label must survive");
+});
+
+test("setLabels drops only the named label", async () => {
+  const { adapter, captured } = labelAdapter([
+    { id: "l-task", name: "type:task" },
+    { id: "l-stuck", name: "crew:stuck" },
+  ]);
+  await adapter.setLabels("i1", { remove: ["crew:stuck"] });
+  assert.deepEqual(captured.labelIds, ["l-task"]);
+});
+
+test("setLabels never repeats an id, which would fail the whole mutation", async () => {
+  // Adding a label the issue already carries.
+  const { adapter, captured } = labelAdapter([{ id: "l-stuck", name: "crew:stuck" }]);
+  await adapter.setLabels("i1", { add: ["crew:stuck"] });
+  const ids = captured.labelIds ?? [];
+  assert.deepEqual([...new Set(ids)], ids);
+  assert.deepEqual(ids, ["l-stuck"]);
+});
+
+test("setLabels dedupes when distinct names resolve to one id", async () => {
+  // Linear label names are case-insensitive, so these are the same label.
+  const { adapter, captured } = labelAdapter([{ id: "l-stuck", name: "crew:stuck" }], {
+    caseInsensitive: true,
+  });
+  await adapter.setLabels("i1", { add: ["CREW:STUCK"] });
+  const ids = captured.labelIds ?? [];
+  assert.deepEqual([...new Set(ids)], ids);
+});
+
+test("setLabels is a no-op when both lists are empty", async () => {
+  const { adapter, captured } = labelAdapter([{ id: "l-task", name: "type:task" }]);
+  await adapter.setLabels("i1", {});
+  assert.equal(captured.labelIds, undefined, "must not touch the issue at all");
+});
+
+test("setLabels ignores blank label names", async () => {
+  const { adapter, captured } = labelAdapter([{ id: "l-task", name: "type:task" }]);
+  await adapter.setLabels("i1", { add: ["  "], remove: [""] });
+  assert.equal(captured.labelIds, undefined);
+});

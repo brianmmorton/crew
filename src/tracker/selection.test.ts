@@ -57,6 +57,60 @@ test("isExecutable rejects items whose parent is not approved", () => {
   assert.equal(isExecutable(item({ parentApproved: false }), cfg), false);
 });
 
+// ------------------------- the needs-human guarantee ------------------------
+
+/**
+ * `needs-human` is enforced separately from `excludeLabels` on purpose: a user
+ * who configures that list would otherwise overwrite the default and silently
+ * put the executor back on work that asked for a person.
+ */
+
+/** cfg carrying the lifecycle label names, as a loaded config always does. */
+const labelled = {
+  ...cfg,
+  tracker: {
+    ...cfg.tracker,
+    labels: { stuck: "crew:stuck", needsHuman: "crew:needs-human" },
+  },
+} as unknown as CrewConfig;
+
+test("an item marked needs-human is never executable", () => {
+  assert.equal(isExecutable(item({ labels: ["crew:needs-human"] }), labelled), false);
+});
+
+test("needs-human holds even when the item also satisfies requireLabels", () => {
+  const g = {
+    ...labelled,
+    tracker: {
+      ...(labelled.tracker as object),
+      executable: { requireLabels: ["crew"], excludeLabels: [] },
+    },
+  } as unknown as CrewConfig;
+  assert.equal(isExecutable(item({ labels: ["crew"] }), g), true);
+  assert.equal(isExecutable(item({ labels: ["crew", "crew:needs-human"] }), g), false);
+});
+
+test("a user-configured excludeLabels does not displace the needs-human guard", () => {
+  const g = {
+    ...labelled,
+    tracker: {
+      ...(labelled.tracker as object),
+      executable: { requireLabels: [], excludeLabels: ["blocked"] },
+    },
+  } as unknown as CrewConfig;
+  assert.equal(isExecutable(item({ labels: ["blocked"] }), g), false);
+  assert.equal(isExecutable(item({ labels: ["crew:needs-human"] }), g), false);
+});
+
+test("the stuck label does NOT block execution — it is how work resumes", () => {
+  assert.equal(isExecutable(item({ labels: ["crew:stuck"] }), labelled), true);
+});
+
+test("a config without lifecycle label names still selects normally", () => {
+  // `cfg` has no tracker.labels at all, as a pre-upgrade config would not.
+  assert.equal(isExecutable(item({ labels: ["crew:needs-human"] }), cfg), true);
+});
+
 /** cfg with a label gate layered over the shared base. */
 function gated(gate: { requireLabels?: string[]; excludeLabels?: string[] }): CrewConfig {
   return {

@@ -28,6 +28,10 @@ import {
 import type { AgentDef, AgentKind, CrewConfig, PersonaName } from "../types.js";
 import { GitAdapter } from "../git/git.js";
 import { destroySlot, poolStatus, releaseSlot, worktreeRootFor } from "../git/pool.js";
+import { formatStuck, stuckItems } from "../engine/stuck.js";
+import { listClaims, releaseClaim } from "../engine/claim.js";
+import { clearVerifyFailure } from "../util/verifyfail.js";
+import { setResumeAttempts, setVerifyAttempts } from "../util/state.js";
 
 /** Compute the next fire time for a cron cadence, or null if it never/invalid. */
 function nextRunFor(cadence: string): Date | null {
@@ -271,6 +275,22 @@ program
       );
     }
     console.log(`agents:       ${agents.map((a) => a.name).join(", ") || "(none found)"}`);
+    const stuck = stuckItems(cfg);
+    if (stuck.length) {
+      const abandoned = stuck.filter((s) => s.state === "abandoned").length;
+      console.log("");
+      console.log(
+        `in flight:    ${stuck.length}` +
+          (abandoned ? `   ${abandoned} abandoned by a died run` : ""),
+      );
+      for (const line of formatStuck(stuck)) console.log(line);
+      if (abandoned) {
+        console.log(
+          `  an abandoned item is picked up again the next time it is selected;\n` +
+            `  clear one by hand with: crew unclaim <id>`,
+        );
+      }
+    }
     console.log("");
     printSchedule(agents);
     console.log("");
@@ -317,6 +337,14 @@ worktreeCmd
           `pushed, or work that needs a human. They stay out of the pool until resolved.\n` +
           `Inspect the branch, then: crew worktrees release <slot>`,
       );
+    }
+
+    // A retained slot says a slot is held; this says which item is behind it
+    // and why — the question you actually have when you run this command.
+    const stuck = stuckItems(cfg);
+    if (stuck.length) {
+      console.log(`\nin flight:`);
+      for (const line of formatStuck(stuck)) console.log(line);
     }
   });
 
@@ -381,6 +409,68 @@ worktreeCmd
       console.log(
         `\nNote: gates.setup ("${cfg.gates.setup}") still runs on the first cycle in each\n` +
           `slot. Its output is what later cycles reuse.`,
+      );
+    }
+  });
+
+program
+  .command("unclaim")
+  .argument("[id]", "issue identifier, e.g. ABC-1; omit to list what is held")
+  .option("--all-stale", "release every claim whose owning process is gone")
+  .option("--reset", "also clear the retry counters and any pending verify fix")
+  .description("Release an in-flight claim so the item can be picked up again")
+  .action((id: string | undefined, opts: { allStale?: boolean; reset?: boolean }) => {
+    const cfg = loadConfig();
+    const held = stuckItems(cfg);
+
+    if (!id && !opts.allStale) {
+      if (!held.length) {
+        console.log("Nothing is claimed.");
+        return;
+      }
+      console.log(`${held.length} item(s) in flight:\n`);
+      for (const line of formatStuck(held)) console.log(line);
+      console.log(`\nRelease one with: crew unclaim <id>`);
+      return;
+    }
+
+    const targets = opts.allStale
+      ? held.filter((h) => h.state === "abandoned").map((h) => h.identifier)
+      : [id as string];
+    if (!targets.length) {
+      console.log("No abandoned claims to release.");
+      return;
+    }
+
+    for (const t of targets) {
+      const known = listClaims(cfg.configDir).some((c) => c.identifier === t);
+      // A live worker's claim is releasable on purpose — that is the escape
+      // hatch when a run wedges — but it must be said out loud, since the
+      // worker will keep going and could still push.
+      const live = held.find((h) => h.identifier === t && h.state === "working");
+      if (live) {
+        console.log(
+          `warning: ${t} is claimed by a RUNNING worker (pid ${live.claim?.pid ?? "?"}). ` +
+            `Releasing it lets a second worker take the same item.`,
+        );
+      }
+      releaseClaim(cfg.configDir, t);
+      if (opts.reset) {
+        setVerifyAttempts(cfg.configDir, t, 0);
+        setResumeAttempts(cfg.configDir, t, 0);
+        clearVerifyFailure(cfg.configDir, t);
+      }
+      console.log(
+        known
+          ? `${t}: claim released${opts.reset ? " and retry state cleared" : ""}.`
+          : `${t}: no claim was held${opts.reset ? "; retry state cleared" : ""}.`,
+      );
+    }
+
+    if (opts.reset) {
+      console.log(
+        `\nNote: --reset discards the record of a failed verification, so the next\n` +
+          `run starts the item over rather than fixing the existing commit.`,
       );
     }
   });

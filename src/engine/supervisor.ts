@@ -14,6 +14,7 @@ import { killActiveRuns } from "../personas/runner.js";
 import { readState, writeState } from "../util/state.js";
 import { scheduledAgents } from "../agent/agents.js";
 import { poolStatus, worktreeRootFor } from "../git/pool.js";
+import { formatStuck, stuckItems } from "./stuck.js";
 
 export interface RunOptions {
   /** Schedule the proposer personas on their cadence (default true). */
@@ -403,6 +404,14 @@ export async function runSupervised(
       `status: backlog=${backlog} inProgress=${inProgress}/${cfg.gates.wipCap} ` +
         `paused=${teamPaused}${pool}`,
     );
+    const stuck = stuckItems(cfg);
+    for (const line of formatStuck(stuck)) logger.info(line);
+    if (stuck.some((s) => s.state === "abandoned")) {
+      logger.warn(
+        `some items were abandoned by a died run; they are picked up again when ` +
+          `next selected, or clear them with \`crew unclaim --all-stale\``,
+      );
+    }
     for (const j of jobs) {
       logger.info(`  ${j.name}: next ${j.nextRun()?.toLocaleString() ?? "—"}`);
     }

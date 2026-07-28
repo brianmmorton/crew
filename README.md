@@ -289,9 +289,53 @@ of `config.yaml`:
   `executable.excludeLabels` (label gate on what the executor may claim — see
   below), and a `jira` block for Jira-specific issue types and priorities. The
   older `linear:` spelling is still accepted.
+- **budget** — `implementerWorkers` (how many items are implemented at once;
+  default 1, max 8), plus usage back-off and poll intervals.
 - **personas** — your agents; see below.
 
 The `.crew/` directory name can be overridden with the `CREW_DIR` env var.
+
+## When a cycle fails
+
+A run can die at several points — during the agent run, the git work, the verify
+gate, the push, or the tracker update — and crew tries to resume rather than
+start the item over. What happens depends on how far it got:
+
+| Where it failed | What crew does |
+|---|---|
+| Agent made no commit | Item returns to the backlog; the worktree is discarded |
+| Verify gate failed | Commit and failure output are **kept**; the next cycle re-runs the agent in the same worktree with the failing output, telling it to amend. Twice, then the item is demoted |
+| Push / PR / tracker update | Commit is kept; the next cycle retries just the plumbing — no agent run, no tokens. Three times, then demoted |
+| Agent committed outside its worktree | Nothing is discarded and the item is labelled `crew:needs-human` — it is never auto-resumed |
+
+Two labels make this visible on the board: **`crew:stuck`** (crew will pick it
+back up) and **`crew:needs-human`** (it will not — this label always excludes an
+item from selection, whatever your `executable` gate says). Both names are
+configurable under `tracker.labels`.
+
+`crew status` and `crew worktrees` list everything in flight, including work
+abandoned by a run that died. Release one by hand with:
+
+```bash
+crew unclaim                     # what is currently held
+crew unclaim ABC-1               # release one item
+crew unclaim --all-stale         # release everything whose process is gone
+crew unclaim ABC-1 --reset       # also clear retry counters and any pending fix
+```
+
+## Running several items at once
+
+`budget.implementerWorkers` (default 1) sets how many items are implemented
+concurrently. Each worker takes a per-item lock before touching a ticket, so two
+workers can never work the same one — the tracker has no compare-and-set to
+arbitrate with, so this is what makes concurrency safe. A worker whose process
+dies leaves a lock behind, which the next run reclaims automatically.
+
+Turn it up with `worktrees.reuse: true`, or each worker pays for its own full
+checkout every cycle. The pool defaults to one slot per worker.
+
+Note this coordinates workers on **one machine**. Two crew instances on
+different machines pointed at the same tracker can still double-claim.
 
 ## Agents
 

@@ -418,6 +418,30 @@ export class JiraAdapter implements TrackerPort {
     await this.client.assign(issueId, userId);
   }
 
+  async setLabels(
+    issueId: string,
+    change: { add?: string[]; remove?: string[] },
+  ): Promise<void> {
+    this.ensureMeta();
+    // Jira labels cannot contain spaces; the API rejects the whole update if
+    // one does. Normalizing here keeps a configured label with a space in it
+    // from breaking every cycle that tries to apply it.
+    const norm = (l: string) => l.trim().replace(/\s+/g, "-");
+    const add = (change.add ?? []).map(norm).filter(Boolean);
+    const remove = new Set((change.remove ?? []).map(norm).filter(Boolean));
+    if (!add.length && !remove.size) return;
+
+    const issue = await this.client.issue(issueId);
+    const current: string[] = Array.isArray(issue.fields.labels) ? issue.fields.labels : [];
+    const next = current.filter((l) => !remove.has(l));
+    for (const l of add) if (!next.includes(l)) next.push(l);
+
+    // Nothing actually changed — skip the write rather than burn an API call.
+    if (next.length === current.length && next.every((l, i) => l === current[i])) return;
+
+    await this.client.updateIssue(issueId, { labels: next });
+  }
+
   async createIssue(
     proposal: Proposal,
     opts: {
