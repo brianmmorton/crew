@@ -47,6 +47,8 @@ interface Sim {
   pushFails?: boolean;
   prFails?: boolean;
   verifyOk?: boolean;
+  /** Work found in the MAIN checkout — an agent that escaped its worktree. */
+  stray?: { commits: string[]; dirtyFiles: string[] };
 }
 
 interface Rec {
@@ -127,6 +129,7 @@ function harness(sim: Sim = {}) {
         return freshWt;
       },
       hasCommits: async () => sim.hasCommits ?? true,
+      strayWork: async () => sim.stray ?? { commits: [], dirtyFiles: [] },
       noTouchViolations: async () => [],
       changedApps: async () => [],
       push: async () => {
@@ -255,6 +258,80 @@ test("a no-commit run logs why the item was demoted", async () => {
   const out = await implementerCycle(cfg, ports, logger);
   assert.equal(out.status, "no-commit");
   assert.ok(lines.some((l) => /WARN.*produced no commit/.test(l)));
+});
+
+// --------------------- agent escaped its worktree ---------------------------
+
+/**
+ * The failure this prevents: an agent `cd`s into the main checkout (usually
+ * because the repo's AGENTS.md hardcodes an absolute path) and commits there.
+ * The worktree branch is empty, so the cycle reported "no commit", demoted the
+ * ticket, and deleted the worktree — while the real work sat on the user's
+ * checkout, unmentioned.
+ */
+
+const strayWork = { commits: ["abc123 docs: cache architecture"], dirtyFiles: [] };
+
+test("work committed in the main checkout is detected instead of reported as no-commit", async () => {
+  const { cfg, ports } = harness({ hasCommits: false, stray: strayWork });
+  const out = await implementerCycle(cfg, ports, silent);
+  assert.equal(out.status, "error");
+  assert.match(out.detail ?? "", /outside its worktree/);
+});
+
+test("an escaped agent's worktree is NOT deleted", async () => {
+  const { cfg, ports, rec } = harness({ hasCommits: false, stray: strayWork });
+  await implementerCycle(cfg, ports, silent);
+  assert.deepEqual(rec.removed, [], "nothing may be discarded while work is unaccounted for");
+});
+
+test("an escaped agent does not silently demote the ticket to the backlog", async () => {
+  const { cfg, ports, rec } = harness({ hasCommits: false, stray: strayWork });
+  await implementerCycle(cfg, ports, silent);
+  assert.ok(!rec.transitions.includes("Backlog"), "must not recycle work that needs a human");
+});
+
+test("the escape is logged as an error naming the main checkout", async () => {
+  const { cfg, ports } = harness({ hasCommits: false, stray: strayWork });
+  const { logger, lines } = recordingLogger();
+  await implementerCycle(cfg, ports, logger);
+  const errors = lines.filter((l) => l.startsWith("ERROR"));
+  assert.ok(errors.some((l) => /worked OUTSIDE its worktree/.test(l)));
+  assert.ok(errors.some((l) => l.includes("/repo")), "names where the stray work landed");
+  assert.ok(errors.some((l) => /abc123/.test(l)), "shows the stray commit");
+});
+
+test("the ticket gets a comment explaining the escape", async () => {
+  const { cfg, ports, rec } = harness({ hasCommits: false, stray: strayWork });
+  await implementerCycle(cfg, ports, silent);
+  assert.ok(rec.comments.some((c) => /outside its worktree/.test(c)));
+});
+
+test("uncommitted stray changes also count as work worth preserving", async () => {
+  const { cfg, ports, rec } = harness({
+    hasCommits: false,
+    stray: { commits: [], dirtyFiles: ["M src/a.ts", "?? docs/b.md"] },
+  });
+  const out = await implementerCycle(cfg, ports, silent);
+  assert.equal(out.status, "error");
+  assert.deepEqual(rec.removed, []);
+});
+
+test("a genuinely empty run still demotes and cleans up as before", async () => {
+  const { cfg, ports, rec } = harness({ hasCommits: false });
+  const out = await implementerCycle(cfg, ports, silent);
+  assert.equal(out.status, "no-commit", "no stray work means the old behaviour is correct");
+  assert.deepEqual(rec.removed, ["/wt/fresh"]);
+  assert.ok(rec.transitions.includes("Backlog"));
+});
+
+test("a GitPort without strayWork support falls back to plain no-commit", async () => {
+  const { cfg, ports, rec } = harness({ hasCommits: false });
+  // Older/alternative adapters may not implement the optional diagnostic.
+  delete (ports.git as unknown as Record<string, unknown>).strayWork;
+  const out = await implementerCycle(cfg, ports, silent);
+  assert.equal(out.status, "no-commit");
+  assert.deepEqual(rec.removed, ["/wt/fresh"]);
 });
 
 // --------------------------- resuming --------------------------------------

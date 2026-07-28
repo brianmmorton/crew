@@ -516,6 +516,12 @@ export interface GitPort {
   findWorktree(branch: string): Promise<string | null>;
   /** Any commits on the worktree ahead of origin/base? */
   hasCommits(worktreePath: string): Promise<boolean>;
+  /**
+   * Work sitting in the MAIN checkout rather than a worktree — the signature of
+   * an agent that `cd`'d out of its sandbox. Diagnostic only; optional so
+   * alternative GitPort implementations need not provide it.
+   */
+  strayWork?(): Promise<{ commits: string[]; dirtyFiles: string[] }>;
   /** Which app dirs (keys of gates.verify) changed on the branch. */
   changedApps(worktreePath: string, appNames: string[]): Promise<string[]>;
   /** Files matching any noTouch glob that were modified (violations). */

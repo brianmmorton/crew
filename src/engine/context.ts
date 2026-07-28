@@ -1,14 +1,42 @@
 import type { AgentDef, CrewConfig, WorkItem } from "../types.js";
 
-/** Assemble the full prompt for an executor agent working one issue. */
+/**
+ * Assemble the full prompt for an executor agent working one issue.
+ *
+ * `worktree` is stated explicitly and repeatedly: agents otherwise `cd` into
+ * the main checkout — usually because the repo's AGENTS.md hardcodes an
+ * absolute path — and commit there. That leaves the worktree branch empty, so
+ * the run looks like "no commit" while real work sits on the user's checkout.
+ */
 export function buildImplementerPrompt(
   cfg: CrewConfig,
   personaPrompt: string,
   constitution: string,
   item: WorkItem,
+  worktree?: string,
 ): string {
   const noTouch = cfg.gates.noTouch.map((g) => `  - ${g}`).join("\n");
-  return `${personaPrompt}
+  const where = worktree
+    ? `
+
+# Where you are working (most important constraint)
+
+Your working directory is:
+
+    ${worktree}
+
+This is an isolated git worktree on a throwaway branch. EVERY file you read or
+write and EVERY command you run must be inside it.
+
+- Do NOT \`cd\` to any other directory. Never \`cd\` to ${cfg.repo.path}.
+- If the repo's AGENTS.md (or any other doc) names an absolute path, IGNORE that
+  path and use ${worktree} instead. Those docs were written for a human working
+  in the main checkout; you are not.
+- Use paths relative to the worktree, or absolute paths that start with
+  ${worktree}. If a command needs an explicit directory, use that.
+- Committing anywhere else corrupts the user's checkout and loses your work.`
+    : "";
+  return `${personaPrompt}${where}
 
 # The task you are implementing
 
@@ -27,7 +55,7 @@ ${constitution}
 # Hard constraints
 
 - You are in an isolated git worktree on a throwaway branch. Do NOT push or open a PR — the runner does that.
-- Follow the repo's AGENTS.md for verification commands, conventions, and the pre-commit hook.
+- Follow the repo's AGENTS.md for verification commands, conventions, and the pre-commit hook — but NOT for directory paths. Run everything in your worktree${worktree ? ` (${worktree})` : ""}.
 - Never modify these protected paths:
 ${noTouch}
 - Make exactly ONE atomic commit (git add + git commit) with a Conventional-Commits subject, or make NO commit if you cannot complete the task cleanly and verifiably.

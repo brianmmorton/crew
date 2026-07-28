@@ -143,6 +143,39 @@ export class GitAdapter implements GitPort {
     return out.length > 0;
   }
 
+  /**
+   * Look for work the agent did in the WRONG place. An agent that `cd`s out of
+   * its worktree — into the main checkout, usually because a repo AGENTS.md
+   * told it to — leaves the worktree branch empty while its real work sits on
+   * the main checkout's branch or in its working tree.
+   *
+   * Reporting "no commit" and deleting the worktree in that situation destroys
+   * nothing (the worktree really is empty) but hides a commit that landed on
+   * the user's checkout, which is far worse than a wasted run. So the engine
+   * asks for this whenever a run ends with no commit, and says so loudly.
+   */
+  async strayWork(): Promise<{ commits: string[]; dirtyFiles: string[] }> {
+    const commits = await this.git([
+      "-C",
+      this.repoPath,
+      "log",
+      `origin/${this.baseBranch}..HEAD`,
+      "--oneline",
+    ]).catch(() => "");
+    const dirty = await this.git([
+      "-C",
+      this.repoPath,
+      "status",
+      "--porcelain",
+    ]).catch(() => "");
+    const lines = (s: string) =>
+      s
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
+    return { commits: lines(commits), dirtyFiles: lines(dirty) };
+  }
+
   private async changedFiles(worktreePath: string): Promise<string[]> {
     const out = await this.git([
       "-C",

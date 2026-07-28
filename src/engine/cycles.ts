@@ -197,7 +197,7 @@ export async function implementerCycle(
 
     wt = await ports.git.createWorktree(branch);
 
-    const prompt = buildImplementerPrompt(cfg, exec.prompt, ports.constitution, item);
+    const prompt = buildImplementerPrompt(cfg, exec.prompt, ports.constitution, item, wt);
     const model = modelForComplexity(cfg, item.complexity, exec);
     logger.info(
       `${exec.name} ${item.identifier}: working (complexity=${item.complexity ?? "?"}, model=${model ?? "default"})…`,
@@ -223,6 +223,40 @@ export async function implementerCycle(
     }
 
     if (!(await ports.git.hasCommits(wt))) {
+      // "No commit on the branch" has two very different causes: the agent
+      // genuinely did nothing, or it worked outside its worktree and the commit
+      // landed somewhere else. Only the first is safe to shrug off, so find out
+      // which before touching anything.
+      const stray = await ports.git.strayWork?.().catch(() => null);
+      if (stray && (stray.commits.length || stray.dirtyFiles.length)) {
+        const what = [
+          stray.commits.length ? `${stray.commits.length} commit(s)` : "",
+          stray.dirtyFiles.length ? `${stray.dirtyFiles.length} uncommitted file(s)` : "",
+        ]
+          .filter(Boolean)
+          .join(" and ");
+        logger.error(
+          `${exec.name} ${item.identifier}: the agent worked OUTSIDE its worktree — ` +
+            `${what} found in the main checkout at ${cfg.repo.path}. Its worktree branch is empty.`,
+        );
+        for (const c of stray.commits.slice(0, 10)) logger.error(`  ${item.identifier} │ ${c}`);
+        for (const f of stray.dirtyFiles.slice(0, 20)) logger.error(`  ${item.identifier} │ ${f}`);
+        logger.error(
+          `${item.identifier}: leaving the worktree at ${wt} and NOT discarding anything. ` +
+            `Move that work onto \`${branch}\` (or reset your checkout) before re-running. ` +
+            `A repo AGENTS.md that hardcodes an absolute path is the usual cause.`,
+        );
+        // Preserve the worktree and leave the item in progress: this needs a
+        // human, and silently recycling it would invite the same escape again.
+        preserve = wt;
+        await ports.tracker.addComment(
+          item.id,
+          `crew: the agent committed outside its worktree — ${what} are in the main checkout ` +
+            `(${cfg.repo.path}) instead of on \`${branch}\`. Nothing was discarded; this needs a human.`,
+        );
+        return { status: "error", detail: "agent worked outside its worktree" };
+      }
+
       await demote("the agent produced no commit", `no commit produced. ${res.summary ?? ""}`.trim());
       return { status: "no-commit" };
     }
