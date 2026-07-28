@@ -9,7 +9,7 @@ import { inspectRepo } from "../git/discover.js";
 import { buildPorts } from "../engine/ports.js";
 import { implementerCycle, proposerCycle } from "../engine/cycles.js";
 import { runSupervised } from "../engine/supervisor.js";
-import { runSetup } from "../setup/onboard.js";
+import { runSetup, launchInteractiveAgent } from "../setup/onboard.js";
 import { ensureGitignored } from "../util/gitignore.js";
 import { checkLabelGate, runDoctor } from "../util/doctor.js";
 import { probeDecision, probeVerify } from "../gates/probe.js";
@@ -645,13 +645,51 @@ program
 const agentCmd = program.command("agent").description("Manage agents");
 
 agentCmd
+  .command("add")
+  .argument("[name]", "agent name (lowercase, hyphens); can also be decided during the conversation")
+  .description("Launch Claude to conversationally design a new agent: goal, prompt, kind, cadence, MCP tools")
+  .action(async (name: string | undefined) => {
+    if (name && !isValidAgentName(name)) {
+      console.error(
+        `Invalid agent name "${name}". Use lowercase letters, digits and hyphens ` +
+          `(e.g. "security-review"), 2-40 chars.`,
+      );
+      process.exit(1);
+    }
+    const cfg = loadConfig();
+    const dir = personasDir(cfg);
+    if (name && existsSync(join(dir, `${name}.md`))) {
+      console.error(`${join(dir, `${name}.md`)} already exists — edit it directly.`);
+      process.exit(1);
+    }
+
+    const promptPath = fileURLToPath(new URL("../../templates/add-agent.md", import.meta.url));
+    let prompt = readFileSync(promptPath, "utf8");
+    if (name) {
+      prompt += `\n\nThe user already chose the name "${name}" for this agent — write it to ` +
+        `\`.crew/personas/${name}.md\` (don't ask for a different name unless they want to change it).\n`;
+    }
+
+    const before = new Set(discoverPersonaFiles(cfg));
+    await launchInteractiveAgent(cfg, cfg.agent, prompt);
+
+    const after = discoverPersonaFiles(cfg).filter((n) => !before.has(n));
+    if (after.length) {
+      console.log(`\nCreated: ${after.map((n) => join(dir, `${n}.md`)).join(", ")}`);
+      console.log(`See it listed:  crew agents`);
+    } else {
+      console.log(`\nNo new persona file found in ${dir} — nothing was created.`);
+    }
+  });
+
+agentCmd
   .command("new")
   .argument("<name>", "agent name (lowercase, hyphens; becomes personas/<name>.md)")
   .option("-k, --kind <kind>", "proposer | executor | reviewer", "proposer")
   .option("-c, --cadence <cron>", "cron cadence for proposers", "0 9 * * 1")
   .option("-m, --model <model>", "model override (e.g. haiku, sonnet, opus)")
   .option("-d, --description <text>", "one-line description")
-  .description("Scaffold a new agent: writes personas/<name>.md with frontmatter")
+  .description("Scaffold a new agent from flags: writes personas/<name>.md with fill-in-the-blank frontmatter (see `crew agent add` for a guided, conversational version)")
   .action(
     (
       name: string,

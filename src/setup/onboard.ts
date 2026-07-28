@@ -194,6 +194,56 @@ export function writeChoices(cfg: CrewConfig, choices: SetupChoices): boolean {
 }
 
 /**
+ * Launch a coding-agent CLI as a live interactive session seeded with a
+ * starting prompt, and wait for it to exit. Used for onboarding steps that
+ * need a real back-and-forth with the user rather than a headless run.
+ *
+ * Only Claude Code is known to accept a prompt as a bare argument; for
+ * anything else the prompt goes in on stdin, which every CLI here supports.
+ */
+export async function launchInteractiveAgent(
+  cfg: CrewConfig,
+  agent: { provider: string; command?: string; args?: string[] },
+  prompt: string,
+): Promise<void> {
+  // Make CLAUDE_CODE_OAUTH_TOKEN from <crewDir>/.env / ~/.crew/env available to
+  // the interactive session; force subscription billing (never API credits).
+  loadEnvFiles(cfg.configDir);
+  const env = { ...process.env };
+  delete env.ANTHROPIC_API_KEY;
+  delete env.ANTHROPIC_AUTH_TOKEN;
+
+  const bin = agent.provider === "claude" ? "claude" : agent.command?.trim();
+  if (!bin) {
+    console.log(
+      "\nNo agent CLI configured — set one up with `crew setup`, or run `claude` yourself.",
+    );
+    return;
+  }
+
+  const viaStdin = agent.provider !== "claude";
+  const args = agent.provider === "claude" ? [prompt] : (agent.args ?? []);
+  console.log(`\nLaunching ${bin}…\n`);
+  await new Promise<void>((resolve) => {
+    const child = spawn(bin, args, {
+      cwd: cfg.repo.path,
+      // Hand the interactive session to the user's terminal, except for the
+      // stdin pipe we need to feed the prompt through.
+      stdio: viaStdin ? ["pipe", "inherit", "inherit"] : "inherit",
+      env,
+    });
+    child.on("error", (e) => {
+      console.error(`Could not launch ${bin}: ${(e as Error).message}`);
+      resolve();
+    });
+    child.on("close", () => resolve());
+    if (viaStdin) {
+      child.stdin?.end(prompt);
+    }
+  });
+}
+
+/**
  * Interactive onboarding: pick the providers, then launch the configured
  * coding-agent CLI seeded with the setup prompt so an agent tailors the rest of
  * the crew config to this repo, then deterministically finalize .env and
@@ -207,49 +257,10 @@ export async function runSetup(cfg: CrewConfig): Promise<void> {
       `agent=${choices.agent.provider} in ${basename(cfg.configDir)}/config.yaml`,
   );
 
-  // Make CLAUDE_CODE_OAUTH_TOKEN from <crewDir>/.env / ~/.crew/env available to
-  // the interactive session; force subscription billing (never API credits).
-  loadEnvFiles(cfg.configDir);
-  const env = { ...process.env };
-  delete env.ANTHROPIC_API_KEY;
-  delete env.ANTHROPIC_AUTH_TOKEN;
-
   const promptPath = fileURLToPath(new URL("../../templates/setup-agent.md", import.meta.url));
   const prompt = readFileSync(promptPath, "utf8");
-
-  // The onboarding agent runs on whichever CLI was just chosen. Only Claude
-  // Code is known to accept a prompt as a bare argument; for anything else the
-  // prompt goes in on stdin, which every CLI here supports.
-  const bin = choices.agent.provider === "claude" ? "claude" : choices.agent.command?.trim();
-  if (!bin) {
-    console.log(
-      "\nNo agent CLI configured, so skipping the tailoring step. " +
-        `Edit ${basename(cfg.configDir)}/config.yaml and constitution.md by hand.`,
-    );
-  } else {
-    const viaStdin = choices.agent.provider !== "claude";
-    const args = choices.agent.provider === "claude" ? [prompt] : (choices.agent.args ?? []);
-    console.log(
-      `\nLaunching ${bin} to tailor ${basename(cfg.configDir)}/ to this repo…\n`,
-    );
-    await new Promise<void>((resolve) => {
-      const child = spawn(bin, args, {
-        cwd: cfg.repo.path,
-        // Hand the interactive session to the user's terminal, except for the
-        // stdin pipe we need to feed the prompt through.
-        stdio: viaStdin ? ["pipe", "inherit", "inherit"] : "inherit",
-        env,
-      });
-      child.on("error", (e) => {
-        console.error(`Could not launch ${bin}: ${(e as Error).message}`);
-        resolve();
-      });
-      child.on("close", () => resolve());
-      if (viaStdin) {
-        child.stdin?.end(prompt);
-      }
-    });
-  }
+  console.log(`Tailoring ${basename(cfg.configDir)}/ to this repo…`);
+  await launchInteractiveAgent(cfg, choices.agent, prompt);
 
   console.log("\nFinalizing secrets + gitignore…");
   finalizeEnvAndGitignore(cfg, choices);
