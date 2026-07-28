@@ -4,15 +4,41 @@ import { Logo } from "./Logo.js";
 import type { LogoArt } from "./logoArt.js";
 
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const FRAME_MS = 80;
+const FRAME_MS = 120;
+
+/**
+ * One shared frame counter + timer for every mounted Spinner, rather than
+ * each instance running its own setInterval. The TUI can have several
+ * spinners live at once (one per running agent) — independent timers each
+ * force their own out-of-phase Ink re-render, multiplying the full-screen
+ * repaint rate by the spinner count. A single ticker keeps it at one
+ * repaint per frame no matter how many spinners are on screen.
+ */
+let frame = 0;
+const subscribers = new Set<() => void>();
+let ticker: NodeJS.Timeout | null = null;
+
+function subscribe(fn: () => void): () => void {
+  subscribers.add(fn);
+  if (!ticker) {
+    ticker = setInterval(() => {
+      frame = (frame + 1) % FRAMES.length;
+      for (const sub of subscribers) sub();
+    }, FRAME_MS);
+  }
+  return () => {
+    subscribers.delete(fn);
+    if (subscribers.size === 0 && ticker) {
+      clearInterval(ticker);
+      ticker = null;
+    }
+  };
+}
 
 /** A quiet braille spinner, reused anywhere something is in flight but has no progress to show. */
 export function Spinner({ color = "cyan" }: { color?: string }) {
-  const [frame, setFrame] = useState(0);
-  useEffect(() => {
-    const timer = setInterval(() => setFrame((f) => (f + 1) % FRAMES.length), FRAME_MS);
-    return () => clearInterval(timer);
-  }, []);
+  const [, forceRender] = useState(0);
+  useEffect(() => subscribe(() => forceRender((n) => n + 1)), []);
   return <Text color={color}>{FRAMES[frame]}</Text>;
 }
 

@@ -1,6 +1,6 @@
 import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import { Cron } from "croner";
-import { buildPorts } from "../engine/ports.js";
+import type { Ports } from "../engine/ports.js";
 import { agentsOfKind, scheduledAgents } from "../agent/agents.js";
 import { poolStatus, worktreeRootFor, type SlotMeta } from "../git/pool.js";
 import { stuckItems, type StuckItem } from "../engine/stuck.js";
@@ -75,25 +75,61 @@ function pidAlive(pid: number | undefined): boolean {
 }
 
 /**
+ * The tracker counts shown in the header. These are the only part of a
+ * snapshot that costs a network round trip, so they're fetched on their own
+ * cadence (see `TrackerCounts` use in App.tsx) rather than once a second.
+ */
+export interface TrackerCounts {
+  backlog: number;
+  inProgress: number;
+}
+
+export async function fetchTrackerCounts(ports: Ports): Promise<TrackerCounts> {
+  const [backlog, inProgress] = await Promise.all([
+    ports.tracker.countBacklog(),
+    ports.tracker.countInProgress(),
+  ]);
+  return { backlog, inProgress };
+}
+
+/**
  * One poll tick's worth of state, read fresh from disk each time. Deliberately
  * not incremental — every source here is a small JSON file or a handful of
  * worktree slot files, cheap enough to re-read whole rather than diff.
+ *
+ * Takes an already-built `Ports` rather than building its own — `buildPorts`
+ * does a tracker `resolveMeta()` network call plus forge/agent/constitution
+ * I/O, which is too expensive to redo every second on the poll timer.
+ *
+ * `counts` is passed in rather than fetched here: everything else on this
+ * path is a local file read, so folding the network call in would force the
+ * whole snapshot onto the tracker's (much slower) cadence.
  */
-export async function takeSnapshot(cfg: CrewConfig): Promise<Snapshot> {
+export async function takeSnapshot(
+  cfg: CrewConfig,
+  ports: Ports,
+  counts: TrackerCounts,
+): Promise<Snapshot> {
   try {
-    const ports = await buildPorts(cfg);
-    const [backlog, inProgress] = await Promise.all([
-      ports.tracker.countBacklog(),
-      ports.tracker.countInProgress(),
-    ]);
+    const { backlog, inProgress } = counts;
     const agents = Object.values(ports.agents).sort((a, b) => a.name.localeCompare(b.name));
+    // Deduped by name: `scheduledAgents` is "not an executor, has a cadence",
+    // so a reviewer with a cadence also matches the reviewer pass below and
+    // would otherwise be listed twice — duplicate React keys, and a second
+    // row the selection cursor can land on. First entry wins, so a scheduled
+    // reviewer keeps its next-run time.
+    const seen = new Set<string>();
     const agentRows: AgentRow[] = [
       ...scheduledAgents(agents)
         .sort((a, b) => a.name.localeCompare(b.name))
         .map((agent) => ({ agent, next: nextRunFor(agent.cadence) })),
       ...agentsOfKind(agents, "executor").map((agent) => ({ agent, next: null })),
       ...agentsOfKind(agents, "reviewer").map((agent) => ({ agent, next: null })),
-    ];
+    ].filter((row) => {
+      if (seen.has(row.agent.name)) return false;
+      seen.add(row.agent.name);
+      return true;
+    });
 
     const slots = cfg.worktrees.reuse
       ? poolStatus(worktreeRootFor(cfg.repo.path), cfg.worktrees.max)

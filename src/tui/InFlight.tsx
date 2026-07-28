@@ -16,13 +16,23 @@ function tries(item: StuckItem): string {
   return parts.join(", ");
 }
 
-export function InFlight({ items }: { items: StuckItem[] }) {
+export function InFlight({
+  items,
+  total,
+}: {
+  items: readonly StuckItem[];
+  /** Full count before the frame truncated the list, for the header. */
+  total?: number;
+}) {
   if (items.length === 0) return null;
+  const count = total ?? items.length;
   const abandoned = items.filter((i) => i.state === "abandoned").length;
+  const hidden = count - items.length;
   return (
     <Box flexDirection="column" marginTop={1}>
       <Text bold underline>
-        IN FLIGHT ({items.length}){abandoned ? `  ${abandoned} abandoned` : ""}
+        IN FLIGHT ({count}){abandoned ? `  ${abandoned} abandoned` : ""}
+        {hidden > 0 ? `  +${hidden} more` : ""}
       </Text>
       {items.map((item) => (
         <Box key={item.identifier}>

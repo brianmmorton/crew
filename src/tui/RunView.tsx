@@ -1,7 +1,9 @@
 import React from "react";
 import { Box, Text } from "ink";
+import { useSnapshot } from "valtio";
 import type { AgentRun } from "./runManager.js";
 import { Spinner } from "./Spinner.js";
+import { store } from "./store.js";
 
 const STATUS_COLOR: Record<AgentRun["status"], string> = {
   running: "yellow",
@@ -16,8 +18,16 @@ function elapsed(run: AgentRun): string {
   return `${Math.floor(secs / 60)}m${String(secs % 60).padStart(2, "0")}s`;
 }
 
-/** Full-screen tail of one agent's live `crew once` output. */
-export function RunView({ run, height }: { run: AgentRun; height: number }) {
+/**
+ * Full-screen tail of one agent's live `crew once` output. Reads the run
+ * from the store itself via useSnapshot rather than taking it as a plain
+ * prop — App only reads the agent name (a stable string), so this is the
+ * component that needs to be reactive to the run's streaming `lines`.
+ */
+export function RunView({ agent, height }: { agent: string; height: number }) {
+  const { runs } = useSnapshot(store);
+  const run = runs.get(agent) as AgentRun | undefined;
+  if (!run) return null;
   const visible = run.lines.slice(-height);
   return (
     <Box flexDirection="column">

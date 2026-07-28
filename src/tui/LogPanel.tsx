@@ -1,5 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
+import { useSnapshot } from "valtio";
+import { store } from "./store.js";
 
 const LEVEL_COLOR: Record<string, string> = {
   INFO: "blue",
@@ -16,35 +18,58 @@ function parseLine(line: string): { ts: string; level: string; msg: string } | n
   return { ts: time, level, msg };
 }
 
-export function LogPanel({ lines, height }: { lines: string[]; height: number }) {
-  const visible = lines.slice(-height);
+/**
+ * One log row, memoized on its text. Appending a line shifts every row up by
+ * one, so without this each new line re-renders and re-parses the whole
+ * panel. Keyed by content below, so a row that scrolled but didn't change
+ * keeps its element and bails out here.
+ */
+const LogLine = React.memo(function LogLine({ line }: { line: string }) {
+  const parsed = parseLine(line);
+  if (!parsed) {
+    return (
+      <Text dimColor wrap="truncate-end">
+        {line}
+      </Text>
+    );
+  }
+  return (
+    <Box>
+      <Box width={13}>
+        <Text dimColor>{parsed.ts}</Text>
+      </Box>
+      <Box width={6}>
+        <Text color={LEVEL_COLOR[parsed.level] ?? "white"}>{parsed.level}</Text>
+      </Box>
+      <Text wrap="truncate-end">{parsed.msg}</Text>
+    </Box>
+  );
+});
+
+/**
+ * Reads only store.logLines — the highest-frequency slice, isolated so its
+ * updates never touch Header/AgentList. Memoized on its one primitive prop
+ * so Screen's own re-renders don't cascade in.
+ */
+export const LogPanel = React.memo(function LogPanel({ height }: { height: number }) {
+  const { logLines } = useSnapshot(store);
+  // `start` is the visible window's offset into the whole buffer, so each row
+  // can be keyed by its absolute position rather than its index in the slice.
+  const start = Math.max(0, logLines.length - height);
+  const visible = logLines.slice(start);
   return (
     <Box flexDirection="column" flexGrow={1}>
       <Text bold underline>
         LOG
       </Text>
       {visible.length === 0 && <Text dimColor>(no log output yet)</Text>}
-      {visible.map((line, i) => {
-        const parsed = parseLine(line);
-        if (!parsed) {
-          return (
-            <Text key={i} dimColor wrap="truncate-end">
-              {line}
-            </Text>
-          );
-        }
-        return (
-          <Box key={i}>
-            <Box width={13}>
-              <Text dimColor>{parsed.ts}</Text>
-            </Box>
-            <Box width={6}>
-              <Text color={LEVEL_COLOR[parsed.level] ?? "white"}>{parsed.level}</Text>
-            </Box>
-            <Text wrap="truncate-end">{parsed.msg}</Text>
-          </Box>
-        );
-      })}
+      {visible.map((line, i) => (
+        // Keyed by absolute position in the buffer, which is stable as the
+        // window scrolls: a row that only moved up keeps its element, so
+        // LogLine's memo skips re-parsing it. A plain index key would
+        // renumber every row on append and re-render the whole panel.
+        <LogLine key={start + i} line={line} />
+      ))}
     </Box>
   );
-}
+});

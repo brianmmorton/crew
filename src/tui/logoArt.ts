@@ -6,7 +6,9 @@ export interface LogoCell {
   color: string;
 }
 
-export type LogoArt = LogoCell[][];
+// readonly so a valtio useSnapshot() (which deep-readonlys everything) can
+// still be passed to Logo/LoadingSplash without a cast.
+export type LogoArt = readonly (readonly LogoCell[])[];
 
 // Darkest to lightest. Rendered against the terminal's own background, so pure
 // white/black source pixels still read fine either way.
@@ -44,7 +46,7 @@ export async function fetchLogoArt(
 
     image.resize({ w: width, h: height });
 
-    const art: LogoArt = [];
+    const art: LogoCell[][] = [];
     for (let y = 0; y < height; y++) {
       const row: LogoCell[] = [];
       for (let x = 0; x < width; x++) {

@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { PersonaName } from "../types.js";
+import { store, invalidateTrackerCounts } from "./store.js";
 
 export type RunStatus = "running" | "exited" | "failed";
 
@@ -17,50 +18,46 @@ const MAX_RUN_LINES = 2000;
 
 /**
  * Launches `crew once <agent>` as a child process and keeps its live output
- * and status in memory, keyed by agent name. One run per agent at a time —
- * pressing the key again while a run is live is a no-op rather than a second
- * concurrent cycle on the same agent.
+ * and status in `store.runs`, keyed by agent name. One run per agent at a
+ * time — pressing the key again while a run is live is a no-op rather than
+ * a second concurrent cycle on the same agent.
  *
  * Re-execs with the same node binary and entry script the TUI itself was
  * launched with (`process.execPath` / `process.argv[1]`), so this works
  * identically against `dist/cli/index.js` (installed) and `tsx`-run source
  * (dev) without depending on `crew` being on PATH.
+ *
+ * Writes go straight into the valtio store rather than through a private
+ * map plus a change-listener/notify pattern — valtio already batches
+ * synchronous mutations into one notification per microtask, and only
+ * components that actually read a given run's slice re-render on update.
  */
 export class RunManager {
-  private runs = new Map<PersonaName, AgentRun>();
   private procs = new Map<PersonaName, ChildProcess>();
-  private listeners = new Set<() => void>();
-
-  /** Subscribe to "something changed" — callers re-poll `get`/`all` themselves. */
-  onChange(fn: () => void): () => void {
-    this.listeners.add(fn);
-    return () => this.listeners.delete(fn);
-  }
-
-  private notify(): void {
-    for (const fn of this.listeners) fn();
-  }
 
   get(agent: PersonaName): AgentRun | undefined {
-    return this.runs.get(agent);
+    return store.runs.get(agent);
   }
 
   isRunning(agent: PersonaName): boolean {
-    return this.runs.get(agent)?.status === "running";
+    return store.runs.get(agent)?.status === "running";
   }
 
   start(agent: PersonaName): void {
     if (this.isRunning(agent)) return;
 
-    const run: AgentRun = {
+    store.runs.set(agent, {
       agent,
       status: "running",
       startedAt: new Date(),
       endedAt: null,
       lines: [],
       exitCode: null,
-    };
-    this.runs.set(agent, run);
+    });
+    // Mutations must go through the value proxyMap.get() hands back, not the
+    // object literal above — that literal is unwrapped and mutating it
+    // directly would be invisible to useSnapshot subscribers.
+    const run = () => store.runs.get(agent)!;
 
     const child = spawn(process.execPath, [process.argv[1] ?? "", "once", agent], {
       stdio: ["ignore", "pipe", "pipe"],
@@ -72,26 +69,30 @@ export class RunManager {
       const text = chunk.toString("utf8");
       const newLines = text.split("\n").filter((l) => l.length > 0);
       if (!newLines.length) return;
-      run.lines = [...run.lines, ...newLines].slice(-MAX_RUN_LINES);
-      this.notify();
+      const r = run();
+      r.lines = [...r.lines, ...newLines].slice(-MAX_RUN_LINES);
     };
     child.stdout?.on("data", onData);
     child.stderr?.on("data", onData);
 
     child.on("error", (err) => {
-      run.status = "failed";
-      run.endedAt = new Date();
-      run.lines = [...run.lines, `[tui] failed to start: ${err.message}`];
+      const r = run();
+      r.status = "failed";
+      r.endedAt = new Date();
+      r.lines = [...r.lines, `[tui] failed to start: ${err.message}`];
       this.procs.delete(agent);
-      this.notify();
     });
 
     child.on("exit", (code) => {
-      run.status = code === 0 ? "exited" : "failed";
-      run.exitCode = code;
-      run.endedAt = new Date();
+      const r = run();
+      r.status = code === 0 ? "exited" : "failed";
+      r.exitCode = code;
+      r.endedAt = new Date();
       this.procs.delete(agent);
-      this.notify();
+      // A finished cycle is the most likely moment for the backlog/wip counts
+      // to have moved, so pull the next tracker read forward instead of
+      // waiting out the staleness ceiling.
+      invalidateTrackerCounts();
     });
   }
 

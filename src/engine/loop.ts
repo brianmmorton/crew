@@ -301,5 +301,8 @@ async function runWorker(
       await sleepInterruptible(cfg.budget.pollSeconds * 1000);
     }
   }
-  logger.info("crew executor loop stopped");
+  // Per-worker; `runExecutorLoop` logs the single "loop stopped" once every
+  // worker has drained, so this one stays tagged to avoid reading as a
+  // duplicate of it in the single-worker case.
+  if (tag) logger.info(`${tag}worker stopped`);
 }

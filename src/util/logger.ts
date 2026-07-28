@@ -56,6 +56,17 @@ function fmt(level: string, msg: string, meta?: Record<string, unknown>): string
 }
 
 let sink: WriteStream | null = null;
+let consoleSilenced = false;
+
+/**
+ * Stop writing log lines to stderr, keeping only the file sink. The TUI owns
+ * the screen while it runs and renders these same lines itself (it tails the
+ * log file into its LOG panel), so letting them also hit stderr raw would
+ * interleave with Ink's managed frame and scroll the UI away.
+ */
+export function silenceConsole(silent: boolean): void {
+  consoleSilenced = silent;
+}
 
 /** Also append log lines to a file (in addition to stderr). Best-effort. */
 export function logToFile(filePath: string): void {
@@ -75,7 +86,7 @@ export function logFilePath(configDir: string): string {
 
 function emit(level: string, msg: string, meta?: Record<string, unknown>): void {
   const line = fmt(level, msg, meta);
-  console.error(line);
+  if (!consoleSilenced) console.error(line);
   // The file is for grepping and for pasting into an issue, so it never gets
   // escape codes — even when the terminal copy is colored.
   sink?.write(stripAnsi(line) + "\n");

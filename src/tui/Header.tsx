@@ -1,16 +1,25 @@
 import React from "react";
 import { Box, Text } from "ink";
+import { useSnapshot } from "valtio";
 import type { Snapshot } from "./snapshot.js";
 import { Logo } from "./Logo.js";
-import type { LogoArt } from "./logoArt.js";
+import { store } from "./store.js";
+import type { DeepReadonly } from "./deepReadonly.js";
 
-function poolCounts(slots: Snapshot["slots"]): string | null {
+function poolCounts(slots: DeepReadonly<Snapshot["slots"]>): string | null {
   if (!slots) return null;
   const count = (s: string) => slots.filter((x) => x.state === s).length;
   return `${count("free")} free  ${count("busy")} busy  ${count("retained")} retained`;
 }
 
-export function Header({ snap, logoArt }: { snap: Snapshot; logoArt: LogoArt | null }) {
+/**
+ * Reads only store.snap and store.headerLogo — re-renders independently of
+ * AgentList/LogPanel. Memoized (no props) so Screen's own re-renders (e.g.
+ * on store.rows changing) don't cascade into this subtree too.
+ */
+export const Header = React.memo(function Header() {
+  const { snap, headerLogo: logoArt } = useSnapshot(store);
+  if (!snap) return null;
   const pool = poolCounts(snap.slots);
   return (
     <Box flexDirection="column" marginBottom={1}>
@@ -62,4 +71,4 @@ export function Header({ snap, logoArt }: { snap: Snapshot; logoArt: LogoArt | n
       )}
     </Box>
   );
-}
+});
