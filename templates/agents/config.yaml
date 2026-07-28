@@ -72,6 +72,23 @@ mcpServers: {}
   #   type: "sse"
   #   headers:
   #     Authorization: "Bearer ${ANALYTICS_TOKEN}"
+  #
+  # A server that requires OAuth instead of a static token. crew's runs are
+  # headless, so the browser step happens once ahead of time — run
+  # `crew mcp login <name>` — and crew refreshes the access token itself
+  # before every run after that. See `crew mcp status` / `crew mcp logout`.
+  # linear:
+  #   url: "https://mcp.linear.app/mcp"
+  #   type: "http"
+  #   oauth:
+  #     authorizationUrl: "https://mcp.linear.app/authorize"
+  #     tokenUrl: "https://mcp.linear.app/token"
+  #     clientId: "${LINEAR_MCP_CLIENT_ID}"
+  #     # clientSecret: "${LINEAR_MCP_CLIENT_SECRET}"  # confidential clients only
+  #     scopes: "read"
+  #     # redirectUri: "http://127.0.0.1:PORT/callback"  # only if the provider
+  #     # requires a pre-registered exact redirect URI (port included). Omit to
+  #     # let `crew mcp login` pick an ephemeral port.
 
 # --- Issue tracker -----------------------------------------------------------
 # Where crew files work and reads it back. `provider` picks the adapter:
@@ -98,6 +115,15 @@ tracker:
     bug: "type:bug"
     task: "type:task"
     chore: "type:chore-dx"
+    # Applied when a cycle fails in a way the next cycle can resume from — the
+    # item goes back to "ready" carrying this, and the executor picks up the
+    # preserved worktree instead of starting over. Not meant to be set by hand.
+    stuck: "crew:stuck"
+    # Applied when an item needs a person (e.g. repeated verify failure).
+    # Recovery never auto-resumes an item carrying this — it's also listed in
+    # executable.excludeLabels by default so the executor stops claiming it,
+    # not just annotates it. Clear it yourself once you've unblocked the item.
+    needsHuman: "crew:needs-human"
 
   # Workflow state names, exactly as they appear on your board. On Jira these
   # must match real statuses in the project's workflow — crew checks at startup
@@ -122,6 +148,12 @@ tracker:
     # Items carrying any of these are never claimed, even if they also satisfy
     # requireLabels. Unlabeled items are unaffected.
     excludeLabels: []
+
+  # Non-material proposals (bug/task/chore-dx below your PRD threshold) go
+  # straight to the ready state, so the executor picks them up immediately.
+  # Set false to stage everything in Backlog for manual promotion instead —
+  # useful if you want a human gate on every item, not just PRDs.
+  autoPromote: true
 
   # Jira-only. Ignored when provider is "linear".
   jira:

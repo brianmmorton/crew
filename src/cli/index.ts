@@ -34,6 +34,7 @@ import { listClaims, releaseClaim } from "../engine/claim.js";
 import { clearVerifyFailure } from "../util/verifyfail.js";
 import { setResumeAttempts, setVerifyAttempts } from "../util/state.js";
 import { forgetToken, hasStoredToken } from "../config/oauth.js";
+import { refreshAgentsDoc } from "../setup/agentsDoc.js";
 
 /** Compute the next fire time for a cron cadence, or null if it never/invalid. */
 function nextRunFor(cadence: string): Date | null {
@@ -121,11 +122,19 @@ program
     if (opts.color === false) setColorEnabled(false);
   });
 
-/** Recursively copy template tree into dest, never overwriting existing files. */
+/**
+ * Recursively copy template tree into dest, never overwriting existing files.
+ *
+ * Skips AGENTS.md: unlike every other template here it's crew-owned rather
+ * than user-owned, needs its version placeholder substituted, and is meant to
+ * be refreshed on upgrade rather than left alone forever — see
+ * `refreshAgentsDoc`, which every caller of this function also calls.
+ */
 function copyNoOverwrite(src: string, dest: string): string[] {
   const written: string[] = [];
   mkdirSync(dest, { recursive: true });
   for (const entry of readdirSync(src)) {
+    if (src === TEMPLATES() && entry === "AGENTS.md") continue;
     const s = join(src, entry);
     const d = join(dest, entry);
     if (statSync(s).isDirectory()) {
@@ -174,6 +183,9 @@ program
       console.log(`Scaffolded generic ${dir}/ templates:`);
       for (const w of written) console.log("  " + w);
     }
+    if (refreshAgentsDoc(dest, TEMPLATES(), packageVersion())) {
+      console.log(`  ${join(dest, "AGENTS.md")}`);
+    }
     ensureGitignored(target, `${dir}/.env`);
     console.log(
       "\nThe templates are generic. Recommended next step:\n" +
@@ -196,6 +208,7 @@ program
       copyNoOverwrite(TEMPLATES(), dest);
       console.log(`Scaffolded generic ${dir}/ templates first.\n`);
     }
+    refreshAgentsDoc(dest, TEMPLATES(), packageVersion());
     const cfg = loadConfig(target);
     await runSetup(cfg);
     console.log("\nChecking prerequisites:");
@@ -284,6 +297,9 @@ program
   .option("--no-probe", "Never offer to run the cold-worktree check (for scripts and CI)")
   .action(async (opts: { verifyWorktree?: boolean; probe?: boolean }) => {
     const cfg = loadConfig();
+    if (refreshAgentsDoc(cfg.configDir, TEMPLATES(), packageVersion())) {
+      console.log(`Updated ${join(cfg.configDir, "AGENTS.md")} for this crew version.\n`);
+    }
     console.log("Prerequisites:");
     const ok = await runDoctor(cfg, logger);
 
