@@ -10,6 +10,9 @@ import { InFlight } from "./InFlight.js";
 import { RunView } from "./RunView.js";
 import { LoadingSplash } from "./Spinner.js";
 import { fetchLogoArt, type LogoArt } from "./logoArt.js";
+import { buildPorts } from "../engine/ports.js";
+import { runExecutorLoop, setPaused, wakeExecutor, requestStop, resetStop } from "../engine/loop.js";
+import { logger, logToFile, logFilePath } from "../util/logger.js";
 
 const POLL_MS = 1000;
 const MAX_LOG_LINES = 500;
@@ -25,9 +28,32 @@ export function App({ cfg }: { cfg: CrewConfig }) {
   const [, forceRender] = useState(0);
   const [headerLogo, setHeaderLogo] = useState<LogoArt | null>(null);
   const [splashLogo, setSplashLogo] = useState<LogoArt | null>(null);
+  const [implPaused, setImplPaused] = useState(false);
 
   const runManager = useMemo(() => new RunManager(), []);
   const runsRef = useRef<Map<string, AgentRun>>(new Map());
+
+  // Auto-start the real executor loop (same code path as `crew run`) in-process
+  // so the implementer keeps draining the backlog with `budget.implementerWorkers`
+  // concurrent workers, rather than the one-shot `crew once` a manual run gives.
+  useEffect(() => {
+    let cancelled = false;
+
+    async function start() {
+      logToFile(logFilePath(cfg.configDir));
+      const ports = await buildPorts(cfg);
+      if (cancelled) return;
+      resetStop();
+      setPaused(false);
+      await runExecutorLoop(cfg, ports, logger);
+    }
+
+    void start();
+    return () => {
+      cancelled = true;
+      requestStop();
+    };
+  }, [cfg]);
 
   useEffect(() => {
     const url = cfg.ui.logoUrl;
@@ -54,6 +80,7 @@ export function App({ cfg }: { cfg: CrewConfig }) {
 
   useEffect(() => {
     let cancelled = false;
+    let warnedDoubleRun = false;
 
     async function tick() {
       const next = await takeSnapshot(cfg);
@@ -62,6 +89,13 @@ export function App({ cfg }: { cfg: CrewConfig }) {
       const appended = new LogTail(next.logPath).read();
       if (appended.length) {
         setLogLines((prev) => [...prev, ...appended].slice(-MAX_LOG_LINES));
+      }
+      if (next.supervisorAlive && !warnedDoubleRun) {
+        warnedDoubleRun = true;
+        logger.warn(
+          "a `crew run` supervisor already appears to be running (see header); this TUI is " +
+            "also running its own implementer loop, so both will be draining the backlog",
+        );
       }
     }
 
@@ -101,11 +135,21 @@ export function App({ cfg }: { cfg: CrewConfig }) {
       exit();
       return;
     }
+    if (input === "p") {
+      setImplPaused((p) => {
+        const next = !p;
+        setPaused(next);
+        if (!next) wakeExecutor();
+        logger.info(next ? "implementer paused" : "implementer resumed");
+        return next;
+      });
+      return;
+    }
     if (key.upArrow) setSelected((s) => Math.max(0, s - 1));
     else if (key.downArrow) setSelected((s) => Math.min(agentRows.length - 1, s + 1));
     else if (key.return || input === " ") {
       const row = agentRows[selected];
-      if (!row || row.agent.kind === "reviewer") return;
+      if (!row || row.agent.kind === "reviewer" || row.agent.kind === "executor") return;
       runManager.start(row.agent.name);
       setExpanded(row.agent.name);
     }
@@ -147,13 +191,21 @@ export function App({ cfg }: { cfg: CrewConfig }) {
   return (
     <Box flexDirection="column">
       <Header snap={snap} logoArt={headerLogo} />
-      <AgentList rows={agentRows} runs={runsRef.current} selected={selected} />
+      <AgentList
+        rows={agentRows}
+        runs={runsRef.current}
+        selected={selected}
+        implPaused={implPaused}
+        implWorkers={cfg.budget.implementerWorkers ?? 1}
+      />
       <Box marginTop={1}>
         <LogPanel lines={logLines} height={logHeight} />
       </Box>
       <InFlight items={snap.stuck} />
       <Box marginTop={1}>
-        <Text dimColor>[↑↓] select  [enter] run / view  [q] quit</Text>
+        <Text dimColor>
+          [↑↓] select  [enter] run / view  [p] pause/resume implementer  [q] quit
+        </Text>
       </Box>
     </Box>
   );

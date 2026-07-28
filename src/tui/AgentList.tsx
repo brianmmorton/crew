@@ -20,10 +20,14 @@ export function AgentList({
   rows,
   runs,
   selected,
+  implPaused,
+  implWorkers,
 }: {
   rows: AgentRow[];
   runs: Map<string, AgentRun>;
   selected: number;
+  implPaused: boolean;
+  implWorkers: number;
 }) {
   return (
     <Box flexDirection="column">
@@ -33,8 +37,9 @@ export function AgentList({
       {rows.length === 0 && <Text dimColor>(none found)</Text>}
       {rows.map((row, i) => {
         const isSelected = i === selected;
+        const isExecutor = row.agent.kind === "executor";
         const run = runs.get(row.agent.name);
-        const runnable = row.agent.kind !== "reviewer";
+        const runnable = row.agent.kind !== "reviewer" && !isExecutor;
         const badge = run && run.status !== "running" ? RUN_BADGE[run.status] : null;
         return (
           <Box key={row.agent.name}>
@@ -52,13 +57,19 @@ export function AgentList({
             <Box width={12} flexShrink={0}>
               <Text dimColor>{schedule(row)}</Text>
             </Box>
-            {run?.status === "running" && (
+            {isExecutor && implPaused && <Text dimColor>⏸ paused</Text>}
+            {isExecutor && !implPaused && (
+              <Text color="yellow">
+                <Spinner color="yellow" /> running ({implWorkers}w)
+              </Text>
+            )}
+            {!isExecutor && run?.status === "running" && (
               <Text color="yellow">
                 <Spinner color="yellow" /> running
               </Text>
             )}
-            {badge && <Text color={badge.color}>{badge.text}</Text>}
-            {!run && !runnable && <Text dimColor>(runs on PR only)</Text>}
+            {!isExecutor && badge && <Text color={badge.color}>{badge.text}</Text>}
+            {!run && !runnable && !isExecutor && <Text dimColor>(runs on PR only)</Text>}
           </Box>
         );
       })}
