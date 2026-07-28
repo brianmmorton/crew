@@ -5,7 +5,7 @@ import { join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CrewConfig, ForgeProvider } from "../types.js";
 import { ensureGitignored } from "../util/gitignore.js";
-import { inspectRepo, type RepoFacts } from "../git/discover.js";
+import { inspectRepo, trackedFileCount, type RepoFacts } from "../git/discover.js";
 import { loadEnvFiles } from "../util/env.js";
 import {
   AGENT_PRESETS,
@@ -14,6 +14,15 @@ import {
   type SetupChoices,
   type TrackerProvider,
 } from "./choices.js";
+
+/**
+ * Tracked-file count above which worktree reuse is worth offering.
+ *
+ * Deliberately high. Below this a cold checkout is seconds, so reuse trades
+ * away cold-tree verification for no real gain — and a question implies the
+ * trade is worth weighing. Most repos never see this prompt.
+ */
+const LARGE_REPO_FILES = 25_000;
 
 /**
  * Ask a single-choice question, returning the chosen index. Falls back to the
@@ -116,12 +125,55 @@ export async function promptForChoices(facts: RepoFacts = {}): Promise<SetupChoi
       agent = { ...preset, provider, command };
     }
 
+    // Worktree reuse is only offered on repos big enough for it to pay for
+    // itself. On a small checkout the honest answer is "no" — asking anyway
+    // would imply the trade is worth considering when it isn't.
+    let worktreeReuse: boolean | undefined;
+    let worktreeMax: number | undefined;
+    const files = facts.root ? trackedFileCount(facts.root) : null;
+    if (files !== null && files >= LARGE_REPO_FILES) {
+      console.log(
+        `\nThis repo tracks ${files.toLocaleString()} files. Each agent normally gets a\n` +
+          `fresh worktree, which on a repo this size means a full checkout plus a\n` +
+          `dependency install every cycle. crew can instead keep a pool of worktrees\n` +
+          `and reset them between cycles, preserving node_modules and build caches.\n` +
+          `\n` +
+          `The trade: a reused worktree carries residue from the previous cycle, so\n` +
+          `a verify pass means "passes given what the last agent left behind" rather\n` +
+          `than "passes cold" — cold-tree breakage surfaces in CI instead of here.`,
+      );
+      const reuse = await choose(
+        rl,
+        "Reuse a pool of worktrees?",
+        [
+          "No — a fresh worktree per cycle (always verifies cold)",
+          "Yes — reuse a pool (faster cycles, carries residue)",
+        ],
+        0,
+      );
+      worktreeReuse = reuse === 1;
+
+      if (worktreeReuse) {
+        // Each slot is a full checkout of a repo we just established is large,
+        // so this number is a disk budget as much as a concurrency setting.
+        const answer = await ask(
+          rl,
+          "How many worktrees may run at once? Each is a full checkout [2]: ",
+        );
+        const n = Number(answer);
+        worktreeMax = Number.isInteger(n) && n >= 1 && n <= 32 ? n : 2;
+        console.log(`  → ${worktreeMax} worktree(s). Run \`crew worktrees warm\` to create them up front.`);
+      }
+    }
+
     return {
       tracker: trackers[t],
       forge: forges[f],
       agent,
       bitbucketRepo,
       baseBranch: facts.baseBranch,
+      worktreeReuse,
+      worktreeMax,
     };
   } finally {
     rl.close();

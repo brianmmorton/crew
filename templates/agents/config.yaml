@@ -149,6 +149,36 @@ budget:
   backoffMinutes: 30
   pollSeconds: 60
 
+# --- Worktrees ---------------------------------------------------------------
+# Every cycle runs in an isolated git worktree. By default each one is created
+# fresh and thrown away, so an agent always verifies against a genuinely cold
+# tree — the same thing `crew doctor --verify-worktree` proves.
+#
+# On a very large repo that costs real time per cycle: a full checkout, then
+# gates.setup reinstalling dependencies into an empty tree. Set reuse: true to
+# keep a fixed pool of worktrees and reset them between cycles instead, which
+# preserves node_modules and build caches.
+#
+# THE TRADE: a reused worktree carries residue from the last cycle, so a verify
+# pass means "passes given what the previous agent left behind" rather than
+# "passes cold". Cold-tree breakage then surfaces in CI instead of here. That's
+# usually worth it on a monorepo where a cold cycle costs minutes; it is not
+# worth it on a repo that checks out in seconds.
+worktrees:
+  reuse: false
+  # Pool size. Defaults to budget.implementerWorkers. Each slot is a full
+  # checkout, so this is also your disk budget.
+  # max: 2
+  # Untracked paths a reset keeps. Files your .gitignore already covers are
+  # preserved anyway; this list is for artifacts that are untracked but NOT
+  # ignored. Listing a build *output* here (rather than a cache) lets one
+  # agent's artifacts satisfy the next agent's verify — that's the one way this
+  # setting can produce a wrong result rather than a slow one.
+  # preserveArtifacts: ["node_modules", ".next", ".turbo", ".gradle", "target", "dist", "build"]
+  # Force a full clean every N reuses, so residue can't accumulate forever.
+  # 0 disables it — only sensible if a deep clean is genuinely too expensive.
+  # recycleAfter: 20
+
 gates:
   wipCap: 3
   # Optional: prepare the env before verify (activate a runtime, install deps).

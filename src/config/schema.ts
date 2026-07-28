@@ -105,6 +105,41 @@ export const configSchema = z.object({
       pollSeconds: z.number().int().min(10).default(60),
     })
     .default({}),
+  /**
+   * Worktree reuse. Off by default: a pooled slot is reset between cycles but
+   * keeps build artifacts, so a verify pass means "passes given what the last
+   * agent left behind" rather than "passes cold". That trade is worth making on
+   * a large monorepo, where a fresh checkout plus `gates.setup` costs minutes
+   * per cycle — but it must be chosen, never inherited on upgrade.
+   */
+  worktrees: z
+    .object({
+      reuse: z.boolean().default(false),
+      // Slots to keep. Defaults to budget.implementerWorkers at load time.
+      max: z.number().int().min(1).max(32).optional(),
+      /**
+       * Untracked paths a reset keeps. This is the setting that makes reuse
+       * worth anything — and the only one here that can produce a WRONG result
+       * rather than a slow one. Anything listed survives between cycles, so
+       * listing a path your build treats as an output (rather than a cache)
+       * lets one agent's artifacts satisfy the next agent's verify.
+       */
+      preserveArtifacts: z
+        .array(z.string())
+        .default([
+          "node_modules",
+          ".next",
+          ".turbo",
+          ".gradle",
+          "target",
+          "dist",
+          "build",
+        ]),
+      // Force a full clean (dropping preserveArtifacts) every N uses, so
+      // residue can't accumulate without bound. 0 disables deep cleans.
+      recycleAfter: z.number().int().min(0).default(20),
+    })
+    .default({}),
   gates: z
     .object({
       wipCap: z.number().int().min(1).default(3),

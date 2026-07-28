@@ -26,6 +26,8 @@ import {
   scheduledAgents,
 } from "../agent/agents.js";
 import type { AgentDef, AgentKind, CrewConfig, PersonaName } from "../types.js";
+import { GitAdapter } from "../git/git.js";
+import { destroySlot, poolStatus, releaseSlot, worktreeRootFor } from "../git/pool.js";
 
 /** Compute the next fire time for a cron cadence, or null if it never/invalid. */
 function nextRunFor(cadence: string): Date | null {
@@ -259,12 +261,128 @@ program
     console.log(`agent CLI:    ${agentSummary(cfg)}`);
     console.log(`backlog:      ${backlog}   (cap ${cfg.triager.backlogCap})`);
     console.log(`in progress:  ${inProgress} (WIP cap ${cfg.gates.wipCap})`);
+    if (cfg.worktrees.reuse) {
+      const slots = poolStatus(worktreeRootFor(cfg.repo.path), cfg.worktrees.max);
+      const count = (s: string) => slots.filter((x) => x.state === s).length;
+      console.log(
+        `worktrees:    ${cfg.worktrees.max} pooled — ` +
+          `${count("free")} free, ${count("busy")} busy, ${count("retained")} retained` +
+          `${count("retained") ? "   (see: crew worktrees)" : ""}`,
+      );
+    }
     console.log(`agents:       ${agents.map((a) => a.name).join(", ") || "(none found)"}`);
     console.log("");
     printSchedule(agents);
     console.log("");
     console.log(`log file:     ${logFilePath(cfg.configDir)}`);
     console.log(`run sooner:   crew once <agent>        (see: crew agents)`);
+  });
+
+const worktreeCmd = program
+  .command("worktrees")
+  .description("Inspect and manage the reusable worktree pool (worktrees.reuse)");
+
+worktreeCmd
+  .command("list", { isDefault: true })
+  .description("Show every pool slot, its state, and the branch it holds")
+  .action(() => {
+    const cfg = loadConfig();
+    if (!cfg.worktrees.reuse) {
+      console.log(
+        "worktree reuse is off — every cycle gets a fresh worktree.\n" +
+          "Enable it with `worktrees.reuse: true` in your config.yaml if a cold\n" +
+          "checkout plus gates.setup is costing you real time each cycle.",
+      );
+      return;
+    }
+    const dir = worktreeRootFor(cfg.repo.path);
+    const slots = poolStatus(dir, cfg.worktrees.max);
+    console.log(`pool:  ${dir}`);
+    console.log(
+      `slots: ${cfg.worktrees.max}   deep clean every ${
+        cfg.worktrees.recycleAfter || "never"
+      } uses\n`,
+    );
+    for (const s of slots) {
+      const held = s.branch ? `  ${s.branch}` : "";
+      const age = s.acquiredAt ? `  since ${s.acquiredAt}` : "";
+      console.log(
+        `  slot-${s.slot}  ${s.state.padEnd(9)} uses=${String(s.useCount).padStart(3)}${held}${age}`,
+      );
+    }
+    const retained = slots.filter((s) => s.state === "retained");
+    if (retained.length) {
+      console.log(
+        `\n${retained.length} slot(s) retained: each holds a verified commit that could not be\n` +
+          `pushed, or work that needs a human. They stay out of the pool until resolved.\n` +
+          `Inspect the branch, then: crew worktrees release <slot>`,
+      );
+    }
+  });
+
+worktreeCmd
+  .command("release")
+  .argument("<slot>", "slot number, e.g. 0")
+  .option("--destroy", "also delete the checkout, so the next use starts cold")
+  .description("Force a slot back into the pool (discards any work it holds)")
+  .action((slotArg: string, opts: { destroy?: boolean }) => {
+    const cfg = loadConfig();
+    const slot = Number.parseInt(slotArg, 10);
+    if (!Number.isInteger(slot) || slot < 0 || slot >= cfg.worktrees.max) {
+      console.error(`slot must be between 0 and ${cfg.worktrees.max - 1}`);
+      process.exitCode = 1;
+      return;
+    }
+    const dir = worktreeRootFor(cfg.repo.path);
+    const meta = poolStatus(dir, cfg.worktrees.max)[slot];
+    if (meta.state === "retained") {
+      console.log(
+        `slot-${slot} holds ${meta.branch ?? "work"} that was never landed. ` +
+          `Releasing it discards that work.`,
+      );
+    }
+    if (opts.destroy) destroySlot(dir, slot);
+    releaseSlot(dir, slot, false);
+    console.log(`slot-${slot} released${opts.destroy ? " and destroyed" : ""}.`);
+  });
+
+worktreeCmd
+  .command("warm")
+  .description("Create every pool slot up front, so the first cycles don't pay for a cold checkout")
+  .action(async () => {
+    const cfg = loadConfig();
+    if (!cfg.worktrees.reuse) {
+      console.error("worktree reuse is off; nothing to warm. Set worktrees.reuse: true first.");
+      process.exitCode = 1;
+      return;
+    }
+    const git = new GitAdapter(cfg.repo.path, cfg.repo.baseBranch, undefined, {
+      max: cfg.worktrees.max,
+      preserveArtifacts: cfg.worktrees.preserveArtifacts,
+      recycleAfter: cfg.worktrees.recycleAfter,
+    });
+    const dir = worktreeRootFor(cfg.repo.path);
+    console.log(`Warming ${cfg.worktrees.max} slot(s) under ${dir}`);
+    console.log("On a large repo the first checkout of each slot takes a while.\n");
+    await git.syncBase();
+
+    // Claim every slot, then release them all: claiming is what materializes a
+    // checkout, and doing it here means cycle #1 doesn't discover the cost.
+    const claimed: string[] = [];
+    for (let i = 0; i < cfg.worktrees.max; i++) {
+      const started = Date.now();
+      const wt = await git.createWorktree(`crew/warm-${i}`);
+      claimed.push(wt);
+      console.log(`  ${wt}  (${Math.round((Date.now() - started) / 1000)}s)`);
+    }
+    for (const wt of claimed) await git.removeWorktree(wt);
+    console.log(`\nDone. ${claimed.length} slot(s) ready.`);
+    if (cfg.gates.setup) {
+      console.log(
+        `\nNote: gates.setup ("${cfg.gates.setup}") still runs on the first cycle in each\n` +
+          `slot. Its output is what later cycles reuse.`,
+      );
+    }
   });
 
 program

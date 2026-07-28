@@ -25,6 +25,65 @@ import { agentsOfKind, executorFor } from "../agent/agents.js";
 import { MAX_RESUME_ATTEMPTS, resumeAttempts, setResumeAttempts } from "../util/state.js";
 import type { Complexity, CrewConfig as _Cfg } from "../types.js";
 
+/** How long to wait for a pooled worktree slot before giving the item back. */
+const SLOT_WAIT_MS = 5 * 60 * 1000;
+const SLOT_POLL_MS = 5_000;
+
+/**
+ * Get a worktree, waiting when the pool is momentarily full.
+ *
+ * Waiting (rather than creating an overflow worktree) is what makes
+ * `worktrees.max` a real bound — and on the large repos this feature exists for,
+ * an unbounded pool means unbounded disk. A slot held by a *retained* worktree
+ * won't free on its own, though, so exhaustion that is entirely retention is
+ * reported as the stall it is instead of being waited out.
+ */
+async function acquireWorktree(
+  ports: Ports,
+  branch: string,
+  identifier: string,
+  logger: Logger,
+): Promise<string> {
+  const deadline = Date.now() + SLOT_WAIT_MS;
+  let waited = false;
+  const observed = ports.git as { onPoolEvent?: unknown };
+  if ("onPoolEvent" in observed) {
+    observed.onPoolEvent = (e: { slot: number; how: string; ms: number }) =>
+      logger.info(
+        `${identifier}: worktree slot-${e.slot} ready via ${e.how} in ${(e.ms / 1000).toFixed(1)}s`,
+      );
+  }
+  for (;;) {
+    try {
+      const wt = await ports.git.createWorktree(branch);
+      if (waited) logger.info(`${identifier}: got a worktree slot`);
+      return wt;
+    } catch (e) {
+      const exhausted = e instanceof Error && e.name === "PoolExhaustedError";
+      if (!exhausted) throw e;
+
+      const { retained = 0, busy = 0 } = e as Error & { retained?: number; busy?: number };
+      if (busy === 0) {
+        // Nothing is going to free up: every slot holds work that failed to land
+        // or needs a human. Waiting the full timeout would just delay the report.
+        throw new Error(
+          `every worktree slot is retained (${retained}) — each holds a verified commit ` +
+            `that could not be pushed, or work that needs a human. Resolve those branches ` +
+            `(or raise worktrees.max) before more work can run. Run \`crew worktrees\` to inspect.`,
+        );
+      }
+      if (Date.now() >= deadline) throw e;
+      if (!waited) {
+        waited = true;
+        logger.info(
+          `${identifier}: all worktree slots are in use (busy=${busy}, retained=${retained}); waiting…`,
+        );
+      }
+      await new Promise((r) => setTimeout(r, SLOT_POLL_MS));
+    }
+  }
+}
+
 /**
  * How the user checks their code-host credentials, named for the forge they
  * actually configured — a Bitbucket user has no `gh` to run.
@@ -195,7 +254,7 @@ export async function implementerCycle(
       return out;
     }
 
-    wt = await ports.git.createWorktree(branch);
+    wt = await acquireWorktree(ports, branch, item.identifier, logger);
 
     // Baseline of the user's checkout, taken immediately before the agent runs.
     // The user is normally on a feature branch with their own uncommitted work,
@@ -330,6 +389,14 @@ export async function implementerCycle(
           logger.warn(`${item.identifier}: worktree cleanup failed`, { path: wt, error: String(e) }),
         );
     } else if (preserve) {
+      // Under pooling this is what keeps the slot out of circulation; unpooled
+      // it's a no-op, because there "preserved" just means "not removed".
+      await ports.git.retainWorktree?.(preserve).catch((e) =>
+        logger.warn(`${item.identifier}: could not mark the worktree as retained`, {
+          path: preserve,
+          error: String(e),
+        }),
+      );
       logger.warn(
         `${item.identifier}: kept the worktree at ${preserve} (branch ${branch}) — ` +
           `it holds a verified commit. The next cycle will retry push/PR without re-running the agent.`,

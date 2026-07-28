@@ -1,10 +1,23 @@
 import { execFile } from "node:child_process";
 import { existsSync, realpathSync, rmSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import type { CheckoutSnapshot, ForgePort, GitPort, OpenPrOptions } from "../types.js";
 import { matchesAny } from "../util/glob.js";
 import { GitHubForge } from "./forge/github.js";
+import {
+  acquireSlot,
+  destroySlot,
+  findSlotForBranch,
+  needsDeepClean,
+  type PoolOptions,
+  readMeta,
+  releaseSlot,
+  slotPath,
+  untrackedToRemove,
+  worktreeRootFor,
+  writeMeta,
+} from "./pool.js";
 
 const pExecFile = promisify(execFile);
 
@@ -20,14 +33,27 @@ function sanitizeBranch(branch: string): string {
  */
 export class GitAdapter implements GitPort {
   private readonly forge: ForgePort;
+  /**
+   * Set only when worktree reuse is enabled. Unset means every cycle gets a
+   * fresh checkout — the original behaviour, and what the cold-verify probe
+   * always wants regardless of how the engine is configured.
+   */
+  private readonly pool?: PoolOptions;
 
   constructor(
     private readonly repoPath: string,
     private readonly baseBranch: string,
     /** Defaults to GitHub so existing callers keep their behaviour. */
     forge?: ForgePort,
+    pool?: PoolOptions,
   ) {
     this.forge = forge ?? new GitHubForge(repoPath);
+    this.pool = pool;
+  }
+
+  /** Root of the worktree area — the parent of both pooled and per-branch trees. */
+  private worktreeRoot(): string {
+    return worktreeRootFor(this.repoPath);
   }
 
   /**
@@ -63,8 +89,136 @@ export class GitAdapter implements GitPort {
    * of any tree the main checkout's tooling walks.
    */
   private worktreePath(branch: string): string {
-    const repoName = basename(this.repoPath) || "repo";
-    return join(dirname(this.repoPath), `.crew-worktrees-${repoName}`, sanitizeBranch(branch));
+    return join(this.worktreeRoot(), sanitizeBranch(branch));
+  }
+
+  /**
+   * Reset a pooled slot to `origin/<base>` on a new branch, keeping the build
+   * artifacts that make reuse worth doing.
+   *
+   * The obvious implementation — `git clean -xdff` — is the wrong primitive at
+   * the scale this feature exists for. `clean` stats the entire working tree to
+   * find untracked files, so on a multi-GB monorepo it costs minutes whether or
+   * not anything needs deleting, and `-e node_modules` stops the deletion but
+   * not the walk. That would leave "reuse" barely faster than a cold checkout.
+   *
+   * Instead: `reset --hard` (proportional to the diff) plus explicit removal of
+   * the untracked paths `status` reports (proportional to the mess). Both track
+   * the previous agent's footprint rather than the repo's size, which is what
+   * makes pooling viable here at all.
+   */
+  private async resetSlot(wt: string, branch: string, deep: boolean): Promise<void> {
+    await this.git(["-C", wt, "checkout", "-B", branch, `origin/${this.baseBranch}`, "--no-track"]);
+    await this.git(["-C", wt, "reset", "--hard", `origin/${this.baseBranch}`]);
+
+    if (deep) {
+      // The periodic honesty check: drop everything untracked, artifacts too.
+      await this.git(["-C", wt, "clean", "-xdff"]);
+      return;
+    }
+
+    const porcelain = await this.git(["-C", wt, "status", "--porcelain", "--untracked-files=normal"]);
+    for (const rel of untrackedToRemove(porcelain, this.pool?.preserveArtifacts ?? [])) {
+      try {
+        rmSync(join(wt, rel), { recursive: true, force: true });
+      } catch {
+        /* best effort — a leftover file is not worth failing the cycle over */
+      }
+    }
+  }
+
+  /**
+   * Claim a pooled slot for `branch`, creating its checkout if this slot has
+   * never been used. Throws `PoolExhaustedError` when nothing is claimable.
+   */
+  private async acquirePooled(branch: string): Promise<string> {
+    const dir = this.worktreeRoot();
+    const opts = this.pool!;
+    const meta = acquireSlot(dir, opts, branch);
+    const wt = slotPath(dir, meta.slot);
+    const started = Date.now();
+    let how = "reset";
+
+    try {
+      const tracked = await this.isTrackedWorktree(wt);
+      if (!tracked) {
+        how = "cold checkout";
+        // First use of this slot, or its checkout was removed underneath us.
+        destroySlot(dir, meta.slot);
+        writeMeta(dir, { ...meta, useCount: 0, lastDeepClean: null });
+        await this.git(["-C", this.repoPath, "worktree", "prune"]).catch(() => {});
+        await this.git(["-C", this.repoPath, "branch", "-D", branch]).catch(() => {});
+        await this.git([
+          "-C",
+          this.repoPath,
+          "worktree",
+          "add",
+          "-b",
+          branch,
+          wt,
+          `origin/${this.baseBranch}`,
+        ]);
+      } else {
+        // Count this reset before deciding: useCount is "resets since the last
+        // deep clean", so recycleAfter:1 must deep-clean on the very first reuse
+        // rather than one cycle later.
+        const uses = meta.useCount + 1;
+        const deep = needsDeepClean({ ...meta, useCount: uses }, opts.recycleAfter);
+        how = deep ? "deep clean" : "reset";
+        // The branch is being recreated, so a leftover of the same name from a
+        // prior cycle has to go or `checkout -B` fights with it.
+        await this.git(["-C", this.repoPath, "branch", "-D", branch]).catch(() => {});
+        await this.resetSlot(wt, branch, deep);
+        writeMeta(dir, {
+          ...readMeta(dir, meta.slot),
+          useCount: deep ? 0 : uses,
+          lastDeepClean: deep ? new Date().toISOString() : meta.lastDeepClean,
+        });
+      }
+    } catch (e) {
+      // A half-reset slot is more dangerous than a slow one: it would hand an
+      // agent a tree with the previous cycle's edits still in it. Destroy it and
+      // let the slot start cold next time rather than salvaging.
+      destroySlot(dir, meta.slot);
+      releaseSlot(dir, meta.slot, false);
+      throw e;
+    }
+
+    try {
+      await this.git(["-C", wt, "config", "core.hooksPath", ".githooks"]);
+    } catch {
+      // ignore — hooks are optional
+    }
+    // Surfacing which path ran and what it cost is how you tell whether
+    // preserveArtifacts is tuned: a "reset" as slow as a cold checkout means
+    // the artifacts you care about aren't actually being kept.
+    this.onPoolEvent?.({ slot: meta.slot, how, ms: Date.now() - started, path: wt });
+    return wt;
+  }
+
+  /** Observer for pool acquisitions, so the engine can log timings. */
+  onPoolEvent?: (e: { slot: number; how: string; ms: number; path: string }) => void;
+
+  /** Is `path` a directory git currently tracks as a worktree of this repo? */
+  private async isTrackedWorktree(path: string): Promise<boolean> {
+    if (!existsSync(path)) return false;
+    try {
+      const list = await this.git(["-C", this.repoPath, "worktree", "list", "--porcelain"]);
+      const want = realpathSync(path);
+      return list
+        .split("\n")
+        .filter((l) => l.startsWith("worktree "))
+        .map((l) => l.slice("worktree ".length).trim())
+        .some((p) => {
+          try {
+            return realpathSync(p) === want;
+          } catch {
+            return false;
+          }
+        });
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -94,10 +248,22 @@ export class GitAdapter implements GitPort {
    * or hand-deleted one must not be resumed.
    */
   async findWorktree(branch: string): Promise<string | null> {
-    // The legacy location is still checked so an upgrade doesn't strand a
-    // worktree holding a verified commit — those are exactly the ones crew
-    // preserves on purpose. New worktrees are only ever made at the new path.
-    for (const wt of [this.worktreePath(branch), this.legacyWorktreePath(branch)]) {
+    const candidates: string[] = [];
+
+    // A retained slot holding this branch is the resume target: it has the
+    // verified commit that failed to land. Missing it would mean paying an
+    // agent to redo work that is already done and already proven.
+    if (this.pool) {
+      const dir = this.worktreeRoot();
+      const held = findSlotForBranch(dir, this.pool.max, branch);
+      if (held) candidates.push(slotPath(dir, held.slot));
+    }
+
+    // Per-branch and legacy locations are still checked even when pooling: an
+    // upgrade must not strand an in-flight worktree that predates the pool.
+    candidates.push(this.worktreePath(branch), this.legacyWorktreePath(branch));
+
+    for (const wt of candidates) {
       if (!existsSync(wt)) continue;
       try {
         const list = await this.git(["-C", this.repoPath, "worktree", "list", "--porcelain"]);
@@ -124,6 +290,8 @@ export class GitAdapter implements GitPort {
   }
 
   async createWorktree(branch: string): Promise<string> {
+    if (this.pool) return this.acquirePooled(branch);
+
     const wt = this.worktreePath(branch);
 
     // Idempotent cleanup: a killed/interrupted run can leave the worktree and
@@ -287,7 +455,21 @@ export class GitAdapter implements GitPort {
     await this.forge.commentOnPr(prUrl, body);
   }
 
+  /**
+   * Give up a worktree.
+   *
+   * For a pooled slot this RELEASES rather than deletes: the checkout and its
+   * build artifacts staying on disk is the entire point of the pool. For an
+   * unpooled worktree — and for anything at a legacy path — it removes, exactly
+   * as before.
+   */
   async removeWorktree(worktreePath: string): Promise<void> {
+    const slot = this.pooledSlotAt(worktreePath);
+    if (slot !== null) {
+      releaseSlot(this.worktreeRoot(), slot, false);
+      return;
+    }
+
     try {
       await this.git([
         "-C",
@@ -300,5 +482,26 @@ export class GitAdapter implements GitPort {
     } catch {
       // best-effort cleanup
     }
+  }
+
+  /**
+   * Mark a worktree as holding work that must not be recycled — a verified
+   * commit that failed to land, or an escape that needs a human. No-op when
+   * unpooled: there the engine keeps the directory itself.
+   */
+  async retainWorktree(worktreePath: string): Promise<void> {
+    const slot = this.pooledSlotAt(worktreePath);
+    if (slot === null) return;
+    releaseSlot(this.worktreeRoot(), slot, true);
+  }
+
+  /** Slot number if `path` is one of this pool's slots, else null. */
+  private pooledSlotAt(path: string): number | null {
+    if (!this.pool) return null;
+    const dir = this.worktreeRoot();
+    for (let i = 0; i < this.pool.max; i++) {
+      if (slotPath(dir, i) === path) return i;
+    }
+    return null;
   }
 }

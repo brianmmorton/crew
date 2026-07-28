@@ -159,9 +159,17 @@ export function loadConfig(startDir = crewRepoOverride() ?? process.cwd()): Crew
   // `cfg.tracker` only, so leaving both would let them drift apart.
   const { linear: _legacy, ...rest } = raw;
 
+  // One slot per worker unless pinned: fewer slots than workers would serialize
+  // the team on slot availability rather than on anything real.
+  const worktrees = {
+    ...raw.worktrees,
+    max: raw.worktrees.max ?? raw.budget.implementerWorkers,
+  };
+
   return {
     ...rest,
     tracker,
+    worktrees,
     repo: { ...raw.repo, path: repoPath, baseBranch, forge, bitbucketRepo },
     configDir,
     constitutionPath,

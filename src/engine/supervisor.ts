@@ -13,6 +13,7 @@ import {
 import { killActiveRuns } from "../personas/runner.js";
 import { readState, writeState } from "../util/state.js";
 import { scheduledAgents } from "../agent/agents.js";
+import { poolStatus, worktreeRootFor } from "../git/pool.js";
 
 export interface RunOptions {
   /** Schedule the proposer personas on their cadence (default true). */
@@ -392,9 +393,15 @@ export async function runSupervised(
       ports.tracker.countBacklog(),
       ports.tracker.countInProgress(),
     ]);
+    let pool = "";
+    if (cfg.worktrees.reuse) {
+      const slots = poolStatus(worktreeRootFor(cfg.repo.path), cfg.worktrees.max);
+      const count = (s: string) => slots.filter((x) => x.state === s).length;
+      pool = ` worktrees=${count("free")}free/${count("busy")}busy/${count("retained")}retained`;
+    }
     logger.info(
       `status: backlog=${backlog} inProgress=${inProgress}/${cfg.gates.wipCap} ` +
-        `paused=${teamPaused}`,
+        `paused=${teamPaused}${pool}`,
     );
     for (const j of jobs) {
       logger.info(`  ${j.name}: next ${j.nextRun()?.toLocaleString() ?? "—"}`);

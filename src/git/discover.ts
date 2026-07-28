@@ -154,3 +154,29 @@ export function inspectRepo(dir: string): RepoFacts {
 export function isGitRepo(dir: string): boolean {
   return git(["rev-parse", "--is-inside-work-tree"], dir) === "true";
 }
+
+/**
+ * How many files git tracks in `dir`, or null if it can't be determined.
+ *
+ * Used to decide whether worktree reuse is even worth asking about. File count
+ * rather than bytes on disk: checkout cost is dominated by creating inodes, so
+ * a repo of many small files is slower to materialize than one large binary of
+ * the same total size.
+ */
+export function trackedFileCount(dir: string): number | null {
+  // Not routed through the `git` helper above: it collapses empty output to
+  // null, which would make an empty repo indistinguishable from a missing one.
+  // Here that difference is real — 0 is a measurement, null is a failure.
+  try {
+    const out = execFileSync("git", ["ls-files", "--", "."], {
+      cwd: dir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: 256 * 1024 * 1024, // a large monorepo's file list is large
+    });
+    const trimmed = out.trim();
+    return trimmed === "" ? 0 : trimmed.split("\n").length;
+  } catch {
+    return null;
+  }
+}

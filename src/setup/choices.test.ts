@@ -122,6 +122,52 @@ test("the template's explanatory comments survive the rewrite", () => {
   assert.match(text, /needs LINEAR_API_KEY/);
 });
 
+test("not answering the worktree question leaves reuse off", () => {
+  // Most repos never see the prompt, so the default must survive untouched —
+  // reuse trades away cold verification and nobody should get it silently.
+  const { cfg } = applied({
+    tracker: "linear",
+    forge: "github",
+    agent: preset("claude"),
+  });
+  assert.equal(cfg.worktrees.reuse, false);
+});
+
+test("declining worktree reuse leaves it off", () => {
+  const { cfg } = applied({
+    tracker: "linear",
+    forge: "github",
+    agent: preset("claude"),
+    worktreeReuse: false,
+  });
+  assert.equal(cfg.worktrees.reuse, false);
+});
+
+test("accepting worktree reuse enables it and pins the pool size", () => {
+  const { cfg, text } = applied({
+    tracker: "linear",
+    forge: "github",
+    agent: preset("claude"),
+    worktreeReuse: true,
+    worktreeMax: 4,
+  });
+  assert.equal(cfg.worktrees.reuse, true);
+  assert.equal(cfg.worktrees.max, 4);
+  // The explanation of the tradeoff has to stay next to the setting it explains.
+  assert.match(text, /passes given what the previous agent left behind/);
+});
+
+test("enabling reuse without a size leaves max to the implementerWorkers default", () => {
+  const { cfg } = applied({
+    tracker: "linear",
+    forge: "github",
+    agent: preset("claude"),
+    worktreeReuse: true,
+  });
+  assert.equal(cfg.worktrees.reuse, true);
+  assert.equal(cfg.worktrees.max, undefined, "unset here; loadConfig fills it in");
+});
+
 test("requiredEnvFor names only the chosen providers' credentials", () => {
   assert.deepEqual(
     requiredEnvFor({ tracker: "linear", forge: "github", agent: preset("claude") }),

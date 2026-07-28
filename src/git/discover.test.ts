@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { findConfigRoot, inspectRepo, parseRemoteUrl } from "./discover.js";
+import { findConfigRoot, inspectRepo, parseRemoteUrl, trackedFileCount } from "./discover.js";
 
 /**
  * Remote URL parsing. Git accepts several spellings for the same remote, and
@@ -99,4 +99,30 @@ test("findConfigRoot finds the marker from deep inside the tree", () => {
 test("findConfigRoot returns null when no crew dir exists above the start", () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "crew-none-")));
   assert.equal(findConfigRoot(root, ".crew-definitely-absent"), null);
+});
+
+/**
+ * Tracked-file count gates the worktree-reuse question at setup, so a wrong
+ * answer either hides the option from a repo that needs it or offers a bad
+ * trade to one that doesn't.
+ */
+
+test("trackedFileCount counts tracked files, ignoring untracked ones", () => {
+  const root = tempRepo();
+  writeFileSync(join(root, "a.txt"), "a");
+  writeFileSync(join(root, "b.txt"), "b");
+  execFileSync("git", ["-C", root, "add", "a.txt", "b.txt"], { stdio: "ignore" });
+  writeFileSync(join(root, "untracked.txt"), "c");
+
+  assert.equal(trackedFileCount(root), 2);
+});
+
+test("trackedFileCount is 0 for a repo with nothing committed", () => {
+  assert.equal(trackedFileCount(tempRepo()), 0);
+});
+
+test("trackedFileCount returns null outside a git repo", () => {
+  // Setup must not offer worktree reuse based on a failed measurement.
+  const plain = realpathSync(mkdtempSync(join(tmpdir(), "crew-nogit-")));
+  assert.equal(trackedFileCount(plain), null);
 });

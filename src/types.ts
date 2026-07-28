@@ -319,6 +319,20 @@ export interface CrewConfig {
     /** Seconds between engine ticks. */
     pollSeconds: number;
   };
+  /**
+   * Worktree reuse. See `worktrees` in src/config/schema.ts for the tradeoff —
+   * pooled slots keep build artifacts between cycles, which is the whole point
+   * on a large repo and also the reason `reuse` defaults to false.
+   */
+  worktrees: {
+    reuse: boolean;
+    /** Slot count. Resolved from budget.implementerWorkers when unset. */
+    max: number;
+    /** Untracked paths a between-cycle reset keeps. */
+    preserveArtifacts: string[];
+    /** Full clean every N uses; 0 disables. */
+    recycleAfter: number;
+  };
   gates: {
     wipCap: number;
     /** Optional env-prep command run before verify, in the same shell. */
@@ -550,6 +564,13 @@ export interface GitPort {
   /** Post a comment on an existing PR (used by reviewer agents). */
   commentOnPr(prUrl: string, body: string): Promise<void>;
   removeWorktree(worktreePath: string): Promise<void>;
+  /**
+   * Mark a worktree as holding work that must survive — a verified commit that
+   * failed to land, or an agent escape needing a human. Optional: only the
+   * pooled implementation has anything to do, since an unpooled worktree is
+   * preserved simply by not removing it.
+   */
+  retainWorktree?(worktreePath: string): Promise<void>;
 }
 
 export interface RunPersonaOptions {

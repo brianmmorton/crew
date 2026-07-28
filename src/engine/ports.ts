@@ -66,7 +66,16 @@ export async function buildPorts(cfg: CrewConfig): Promise<Ports> {
     if (e instanceof ForgeAuthError) throw new PortsError(e.message);
     throw e;
   }
-  const git = new GitAdapter(cfg.repo.path, cfg.repo.baseBranch, forge);
+  // Pooling is opt-in. Passing undefined keeps the original create/destroy
+  // behaviour, which is also what the cold-verify probe always uses.
+  const pool = cfg.worktrees.reuse
+    ? {
+        max: cfg.worktrees.max,
+        preserveArtifacts: cfg.worktrees.preserveArtifacts,
+        recycleAfter: cfg.worktrees.recycleAfter,
+      }
+    : undefined;
+  const git = new GitAdapter(cfg.repo.path, cfg.repo.baseBranch, forge, pool);
 
   const loaded = loadAgents(cfg);
   // The runner needs the resolved agents to look up each persona's MCP grants.

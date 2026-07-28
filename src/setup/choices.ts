@@ -75,6 +75,14 @@ export interface SetupChoices {
    * file states the real branch rather than the template's `main` guess.
    */
   baseBranch?: string;
+  /**
+   * Reuse a pool of worktrees instead of creating one per cycle. Only asked
+   * about on repos big enough for it to pay off; undefined leaves the
+   * template's `reuse: false` untouched.
+   */
+  worktreeReuse?: boolean;
+  /** Pool size, when reuse was chosen. */
+  worktreeMax?: number;
 }
 
 /** Env var names the chosen providers require, for the setup summary. */
@@ -140,6 +148,20 @@ export function applyChoices(yaml: string, choices: SetupChoices): string {
       /^(repo:\s*\n(?:[^\S\n]+[^\n]*\n|[^\S\n]*\n)*)/m,
       (_m, block: string) => `${block}  forge: "${choices.forge}"\n`,
     );
+  }
+
+  // worktrees.reuse — only rewritten when the user opted in, so a config that
+  // was never asked the question keeps the template's documented `false`.
+  if (choices.worktreeReuse) {
+    out = out.replace(/^([^\S\n]+reuse:[^\S\n]*)(?:true|false)[^\S\n]*$/m, `$1true`);
+    if (choices.worktreeMax !== undefined) {
+      // The template ships `max` commented out; replace that line in place so
+      // the surrounding explanation stays attached to it.
+      out = out.replace(
+        /^[^\S\n]*#[^\S\n]*max:[^\n]*$/m,
+        `  max: ${choices.worktreeMax}`,
+      );
+    }
   }
 
   // repo.bitbucketRepo — only meaningful on Bitbucket, and only when known.
