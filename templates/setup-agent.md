@@ -56,7 +56,7 @@ Onboarding is NOT complete until `gates.setup` + every `gates.verify` command
 passes in a fresh worktree. Run:
 
 ```
-crew doctor --verify-worktree
+crew probe
 ```
 
 This creates a throwaway worktree from the base branch and runs your configured

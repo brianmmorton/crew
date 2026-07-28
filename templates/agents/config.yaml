@@ -152,7 +152,7 @@ budget:
 # --- Worktrees ---------------------------------------------------------------
 # Every cycle runs in an isolated git worktree. By default each one is created
 # fresh and thrown away, so an agent always verifies against a genuinely cold
-# tree — the same thing `crew doctor --verify-worktree` proves.
+# tree — the same thing `crew probe` proves.
 #
 # On a very large repo that costs real time per cycle: a full checkout, then
 # gates.setup reinstalling dependencies into an empty tree. Set reuse: true to

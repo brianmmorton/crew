@@ -162,6 +162,32 @@ export async function verifyInWorktree(
 }
 
 /**
+ * Whether `crew doctor` should offer the cold-worktree probe, given the flags
+ * it was passed and whether anyone is there to answer.
+ *
+ * Pure, because the rule matters more than the prompt: the probe runs the
+ * project's real commands and can take minutes, so it must never start without
+ * an explicit yes — and must never block a scripted run waiting for one.
+ */
+export function probeDecision(opts: {
+  /** `--verify-worktree`: run it, no question asked. */
+  explicit?: boolean;
+  /** `--no-probe`: never run it and never ask. */
+  suppressed?: boolean;
+  /** Someone is there to answer a prompt. */
+  interactive: boolean;
+  /** Number of configured `gates.verify` commands. */
+  verifyCount: number;
+}): "run" | "ask" | "notice" | "skip" {
+  if (opts.explicit) return "run";
+  if (opts.suppressed) return "skip";
+  // Nothing configured means nothing to prove — and nagging about a check the
+  // user has opted out of by having no verify commands would just be noise.
+  if (opts.verifyCount === 0) return "skip";
+  return opts.interactive ? "ask" : "notice";
+}
+
+/**
  * Map a failed step to a plain-English cause when the output matches a known
  * cold-worktree failure. These are the mistakes that are genuinely hard to
  * read: the error names a module or binary, never the missing build step, so
@@ -247,7 +273,7 @@ export function formatProbe(result: ProbeResult): string {
 }
 
 /**
- * Run the cold-worktree probe and print it, for `crew doctor --verify-worktree`
+ * Run the cold-worktree probe and print it, for `crew probe`
  * and the end of `crew setup`. Only needs git, so it builds its own adapter
  * rather than going through buildPorts — that would demand tracker credentials
  * the user may not have entered yet during onboarding.
@@ -264,13 +290,26 @@ export async function probeVerify(cfg: CrewConfig): Promise<ProbeResult> {
 
   console.log("\nCold-worktree verify:");
   console.log(formatProbe(result));
-  console.log(
-    result.ok
-      ? "\nVerify commands pass in a clean worktree — agent runs will get the same result."
-      : "\nThese commands fail in a clean worktree even though they may pass in your\n" +
-          "checkout. Every agent run will hit this. Fix gates.setup / gates.verify in\n" +
-          `${cfg.configDir}/config.yaml, then re-run: crew doctor --verify-worktree`,
-  );
+  if (result.ok) {
+    console.log(
+      "\nVerify commands pass in a clean worktree — agent runs will get the same result.",
+    );
+  } else if (result.error) {
+    // The probe never got as far as running anything, so this is a setup
+    // problem (no remote, an unfetchable base branch), not a verdict on the
+    // user's verify commands. Saying "your commands fail" here would send them
+    // to edit config.yaml over something config.yaml cannot fix.
+    console.log(
+      "\nThe probe could not run, so your verify commands were never tested.\n" +
+        "Fix the error above, then re-run: crew probe",
+    );
+  } else {
+    console.log(
+      "\nThese commands fail in a clean worktree even though they may pass in your\n" +
+        "checkout. Every agent run will hit this. Fix gates.setup / gates.verify in\n" +
+        `${cfg.configDir}/config.yaml, then re-run: crew probe`,
+    );
+  }
   return result;
 }
 

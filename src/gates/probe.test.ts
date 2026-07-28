@@ -5,7 +5,13 @@ import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GitAdapter } from "../git/git.js";
-import { diagnose, formatProbe, verifyInWorktree, type ProbeStep } from "./probe.js";
+import {
+  diagnose,
+  formatProbe,
+  probeDecision,
+  verifyInWorktree,
+  type ProbeStep,
+} from "./probe.js";
 import type { CrewConfig } from "../types.js";
 
 /**
@@ -194,4 +200,61 @@ test("the summary marks each app and surfaces the diagnosis", () => {
   assert.match(out, /✗ api/);
   assert.match(out, /○ web/);
   assert.match(out, /prisma generate/);
+});
+
+// ----------------------- when doctor offers the probe -----------------------
+
+/**
+ * The probe runs the project's real commands and can take minutes, so it must
+ * never start without an explicit yes — and must never block a scripted run
+ * waiting for one. It also has to be offered at all: a verify that only passes
+ * in the user's warm checkout breaks every agent cycle, and this check used to
+ * be reachable only via a flag nobody knew about.
+ */
+
+const decide = (o: Partial<Parameters<typeof probeDecision>[0]>) =>
+  probeDecision({ interactive: true, verifyCount: 1, ...o });
+
+test("--verify-worktree runs it without asking", () => {
+  assert.equal(decide({ explicit: true }), "run");
+  // Even where there would be nobody to answer a prompt.
+  assert.equal(decide({ explicit: true, interactive: false }), "run");
+});
+
+test("--verify-worktree wins over --no-probe", () => {
+  // Asking for it explicitly is unambiguous; the suppression flag only governs
+  // the offer, so it must not veto a direct request.
+  assert.equal(decide({ explicit: true, suppressed: true }), "run");
+});
+
+test("--no-probe never runs and never asks", () => {
+  assert.equal(decide({ suppressed: true }), "skip");
+  assert.equal(decide({ suppressed: true, interactive: false }), "skip");
+});
+
+test("an interactive run with verify commands is asked", () => {
+  assert.equal(decide({}), "ask");
+});
+
+test("a non-interactive run is told, not asked", () => {
+  // Blocking on a prompt in CI or behind a pipe would hang the run.
+  assert.equal(decide({ interactive: false }), "notice");
+});
+
+test("no verify commands means there is nothing to prove", () => {
+  assert.equal(decide({ verifyCount: 0 }), "skip");
+  assert.equal(decide({ verifyCount: 0, interactive: false }), "skip", "and no notice either");
+});
+
+test("a cold-worktree probe is never started implicitly", () => {
+  // The guarantee behind all of the above: the only path that runs without a
+  // human saying yes is the one where they passed the flag.
+  for (const interactive of [true, false]) {
+    for (const verifyCount of [0, 1, 5]) {
+      for (const suppressed of [true, false]) {
+        const d = probeDecision({ interactive, verifyCount, suppressed });
+        assert.notEqual(d, "run", `implicit run for ${JSON.stringify({ interactive, verifyCount, suppressed })}`);
+      }
+    }
+  }
 });

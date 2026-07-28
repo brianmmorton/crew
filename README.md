@@ -295,6 +295,27 @@ of `config.yaml`:
 
 The `.crew/` directory name can be overridden with the `CREW_DIR` env var.
 
+## Check your verify commands work where agents run them
+
+```bash
+crew probe
+```
+
+Agents work in a fresh git worktree — a clean checkout with only what git
+tracks. Your own checkout has much more: generated clients, build output,
+installed tooling, a `.env`. A verify command can quietly depend on one of those,
+pass every time you run it, and then fail on **every** agent cycle.
+
+`crew probe` runs your real `gates.setup` + `gates.verify` in a cold worktree and
+tells you which commands are safe there. When one fails it explains why in plain
+English — missing codegen, a binary that isn't on `PATH`, a service that isn't
+running — rather than leaving you with a stack trace that looks like broken
+source code.
+
+It runs your actual test suite, so it can take minutes. `crew setup` runs it at
+the end, `crew doctor` offers it, and you can run it yourself any time. Skip the
+offer in scripts with `crew doctor --no-probe`.
+
 ## When a cycle fails
 
 A run can die at several points — during the agent run, the git work, the verify

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { fileURLToPath } from "node:url";
+import { createInterface } from "node:readline/promises";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { loadConfig, crewDirName, crewRepoOverride } from "../config/load.js";
@@ -11,7 +12,7 @@ import { runSupervised } from "../engine/supervisor.js";
 import { runSetup } from "../setup/onboard.js";
 import { ensureGitignored } from "../util/gitignore.js";
 import { checkLabelGate, runDoctor } from "../util/doctor.js";
-import { probeVerify } from "../gates/probe.js";
+import { probeDecision, probeVerify } from "../gates/probe.js";
 import { logger, logToFile, logFilePath } from "../util/logger.js";
 import { setColorEnabled } from "../util/color.js";
 import { Cron } from "croner";
@@ -204,11 +205,72 @@ program
     if (opts.probe === false) {
       console.log(
         "\nSkipped the cold-worktree verify check. Run it before your first cycle:\n" +
-          "  crew doctor --verify-worktree",
+          "  crew probe",
       );
     } else {
       await probeVerify(loadConfig(target));
     }
+  });
+
+/**
+ * Offer the cold-worktree probe at the end of `crew doctor`.
+ *
+ * Asked rather than run outright because it executes the project's real setup +
+ * verify commands, which can take minutes — but it is asked at all because a
+ * verify that only passes in the user's warm checkout breaks every agent cycle,
+ * and that is not something to leave behind an undiscoverable flag.
+ *
+ * Never prompts without a TTY: in CI or a pipe there is nobody to answer, and
+ * blocking there would hang the run.
+ */
+async function askProbe(
+  cfg: CrewConfig,
+  opts: { explicit?: boolean; suppressed?: boolean },
+): Promise<boolean> {
+  const decision = probeDecision({
+    explicit: opts.explicit,
+    suppressed: opts.suppressed,
+    interactive: !!process.stdin.isTTY,
+    verifyCount: Object.keys(cfg.gates.verify ?? {}).length,
+  });
+  if (decision === "run") return true;
+  if (decision === "skip") return false;
+  if (decision === "notice") {
+    console.log(
+      "\nNot checked: whether gates.verify passes in a cold worktree, where agents\n" +
+        "run it. Run `crew probe` (several minutes) before your first cycle.",
+    );
+    return false;
+  }
+
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    console.log(
+      "\nOne thing this can't tell from here: whether your verify commands pass in a\n" +
+        "COLD worktree. Your checkout has generated code and build output that git\n" +
+        "doesn't track — agents never get those, so a check that passes for you can\n" +
+        "fail on every single run.",
+    );
+    const answer = (
+      await rl.question("Prove them now? Runs your real commands, can take minutes. [y/N]: ")
+    )
+      .trim()
+      .toLowerCase();
+    if (answer === "y" || answer === "yes") return true;
+    console.log("Skipped. Run it any time with: crew probe");
+    return false;
+  } finally {
+    rl.close();
+  }
+}
+
+program
+  .command("probe")
+  .description("Prove gates.setup + gates.verify pass in a cold worktree (where agents run them)")
+  .action(async () => {
+    const cfg = loadConfig();
+    const result = await probeVerify(cfg);
+    if (!result.ok) process.exit(1);
   });
 
 program
@@ -216,16 +278,20 @@ program
   .description("Check that the tools and secrets your configured providers need are present")
   .option(
     "--verify-worktree",
-    "Also prove gates.setup + gates.verify pass in a cold worktree (slow: runs your real checks)",
+    "Also prove gates.setup + gates.verify pass in a cold worktree (same as: crew probe)",
   )
-  .action(async (opts: { verifyWorktree?: boolean }) => {
+  .option("--no-probe", "Never offer to run the cold-worktree check (for scripts and CI)")
+  .action(async (opts: { verifyWorktree?: boolean; probe?: boolean }) => {
     const cfg = loadConfig();
     console.log("Prerequisites:");
     const ok = await runDoctor(cfg, logger);
 
-    // Opt-in: this runs the project's real setup + verify commands, which can
-    // take minutes. Never part of the default doctor run.
-    if (opts.verifyWorktree) {
+    // This runs the project's real setup + verify commands, which can take
+    // minutes — so it is never silently part of a doctor run. But a verify that
+    // only passes in the user's warm checkout breaks EVERY agent cycle, and the
+    // check that catches it was previously reachable only via a flag on this
+    // command. So when nobody asked either way, ask.
+    if (await askProbe(cfg, { explicit: opts.verifyWorktree, suppressed: opts.probe === false })) {
       const result = await probeVerify(cfg);
       if (!result.ok) process.exit(1);
     }
