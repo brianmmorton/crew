@@ -23,6 +23,8 @@ export const appStore = proxy({
   phase: "loading" as Phase,
   /** Project name from config, for the header — set once at boot. */
   project: "",
+  /** Tracker board url (Linear team/project, Jira project) — set once at boot. */
+  boardUrl: "",
   /** Boot checklist shown on the splash, in start order. */
   steps: [] as BootStep[],
   /** Fatal boot/runtime error; switches the screen to the error frame. */
@@ -87,6 +89,7 @@ export function failBoot(message: string): void {
 export function resetAppStore(): void {
   appStore.phase = "loading";
   appStore.project = "";
+  appStore.boardUrl = "";
   appStore.steps = [];
   appStore.error = null;
   appStore.rows = 24;

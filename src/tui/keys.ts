@@ -20,6 +20,7 @@ export type Action =
   | { type: "focus-next" }
   | { type: "focus-right" }
   | { type: "focus-left" }
+  | { type: "open-board" }
   | { type: "quit" };
 
 export function keyToAction(input: string, key: Partial<Key>): Action | null {
@@ -48,6 +49,8 @@ export function keyToAction(input: string, key: Partial<Key>): Action | null {
       return { type: "stop-agent" };
     case "h":
       return { type: "toggle-history" };
+    case "b":
+      return { type: "open-board" };
     case "q":
       return { type: "quit" };
     default:
@@ -60,8 +63,10 @@ export function keyToAction(input: string, key: Partial<Key>): Action | null {
  * Focus-dependent, because ↑↓/⏎ mean different things in each list and a
  * legend that claims otherwise is worse than none.
  */
+// "1-9 run №" still works but goes unadvertised: with `b board` added, the
+// full list overruns a 100-column footer and the truncation eats `q quit`.
 export const LEGEND =
-  "↑↓ navigate · ⏎ expand · → history · r run · 1-9 run № · ␣ pause · p pool · x stop · q quit";
+  "↑↓ navigate · ⏎ expand · → history · r run · ␣ pause · p pool · b board · x stop · q quit";
 
 export const HISTORY_LEGEND =
-  "↑↓ navigate · ⏎ open link · ← back to agents · h hide · q quit";
+  "↑↓ navigate · ⏎ open link · ← back to agents · b board · h hide · q quit";

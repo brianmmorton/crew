@@ -73,6 +73,7 @@ export class LinearAdapter implements TrackerPort {
 
     // Optional project scoping: resolve the configured project by name or id.
     let projectId: string | undefined;
+    let boardUrl: string | undefined;
     if (this.cfg.tracker.project) {
       const want = this.cfg.tracker.project;
       const projConn = await team.projects({ first: PAGE });
@@ -81,6 +82,19 @@ export class LinearAdapter implements TrackerPort {
         throw new Error(`Linear project not found in team "${teamName}": "${want}"`);
       }
       projectId = proj.id;
+      // A scoped repo's board IS the project page; Linear hands us its url.
+      boardUrl = proj.url;
+    }
+    if (!boardUrl) {
+      // Team issue list: linear.app/<workspace-slug>/team/<KEY>/all. The slug
+      // lives on the organization — one extra boot-time read, and cosmetic, so
+      // a failure here degrades to "no link" rather than a failed boot.
+      try {
+        const org = await this.client.organization;
+        boardUrl = `https://linear.app/${org.urlKey}/team/${team.key}/all`;
+      } catch {
+        boardUrl = undefined;
+      }
     }
 
     this.meta = {
@@ -89,6 +103,7 @@ export class LinearAdapter implements TrackerPort {
       labelIds,
       stateIds,
       projectId,
+      boardUrl,
     };
 
     // Ensure the configured type labels exist (create on the fly if missing).

@@ -449,6 +449,13 @@ export interface TrackerMeta {
   stateIds: Record<string, string>;
   /** Resolved project id, if the repo is scoped to a Linear project. */
   projectId?: string;
+  /**
+   * Web url of the board's list view — the Linear team (or scoped project)
+   * page, or the Jira project — so the UI can link "the board" without
+   * knowing which tracker is behind it. Best-effort: absent when the extra
+   * lookup it needs failed, which must never fail the boot.
+   */
+  boardUrl?: string;
 }
 
 /**

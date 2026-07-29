@@ -83,6 +83,7 @@ export async function startBackground(cfg: CrewConfig): Promise<void> {
 
     beginStep("mustering agents & connecting tracker");
     ports = await buildPorts(cfg);
+    appStore.boardUrl = ports.meta.boardUrl ?? "";
     const items = buildAgentItems(ports);
     setAgents(items);
     // Tell the feed who the agents are, so engine log lines about an agent

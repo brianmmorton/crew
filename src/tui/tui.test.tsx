@@ -110,6 +110,7 @@ test("keys: navigation, expand, run, pause, stop, quit all map", () => {
   assert.deepEqual(keyToAction(" ", {}), { type: "pause-agent" });
   assert.deepEqual(keyToAction("p", {}), { type: "pause-pool" });
   assert.deepEqual(keyToAction("x", {}), { type: "stop-agent" });
+  assert.deepEqual(keyToAction("b", {}), { type: "open-board" });
   assert.deepEqual(keyToAction("q", {}), { type: "quit" });
   assert.deepEqual(keyToAction("c", { ctrl: true }), { type: "quit" });
   assert.equal(keyToAction("z", {}), null);
@@ -559,6 +560,38 @@ test("actions: → enters history, ↑↓ drive the focused list, ← comes back
   assert.equal(appStore.focus, "agents");
   dispatch({ type: "down" }, noop);
   assert.equal(agentsStore.selected, 2, "arrows drive agents again");
+});
+
+test("actions: b opens the tracker board from any focus, and never crashes without one", () => {
+  const opened: string[] = [];
+  setOpener((target) => opened.push(target));
+
+  // No board url resolved (e.g. the org lookup failed at boot): narrate, not crash.
+  dispatch({ type: "open-board" }, () => {});
+  assert.deepEqual(opened, []);
+
+  appStore.boardUrl = "https://linear.app/acme/team/ENG/all";
+  dispatch({ type: "open-board" }, () => {});
+  appStore.focus = "history";
+  dispatch({ type: "open-board" }, () => {});
+  assert.deepEqual(opened, [
+    "https://linear.app/acme/team/ENG/all",
+    "https://linear.app/acme/team/ENG/all",
+  ]);
+});
+
+test("render: header shows the tracker board link when one resolved", () => {
+  appStore.rows = 30;
+  appStore.columns = 120;
+  appStore.project = "myproject";
+  appStore.boardUrl = "https://linear.app/acme/team/ENG/all";
+  seedAgents(["qa"]);
+
+  const { lastFrame, unmount } = render(<Dashboard />);
+  const frame = clean(lastFrame());
+  unmount();
+  assert.match(frame, /⎇ https:\/\/linear\.app\/acme\/team\/ENG\/all/);
+  assert.match(frame, /b board/, "the legend advertises the shortcut");
 });
 
 test("actions: ⏎ on a session with no PR or transcript opens nothing", () => {

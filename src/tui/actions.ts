@@ -65,6 +65,14 @@ export function dispatch(action: Action, exit: () => void): void {
     case "focus-left":
       appStore.focus = "agents";
       return;
+    case "open-board":
+      if (appStore.boardUrl) {
+        logger.info(`opening ${appStore.boardUrl}`);
+        openExternal(appStore.boardUrl);
+      } else {
+        logger.info("no board url — the tracker didn't resolve one at boot");
+      }
+      return;
     case "run-selected": {
       const agent = selectedAgent();
       if (agent) runAgent(agent);

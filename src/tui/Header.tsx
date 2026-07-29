@@ -15,7 +15,7 @@ const SLOT_GLYPH = { free: "▢", busy: "▣", retained: "▲" } as const;
 const SLOT_COLOR = { free: undefined, busy: "yellow", retained: "red" } as const;
 
 const Title = memo(function Title(): React.ReactNode {
-  const project = useSnapshot(appStore).project;
+  const { project, boardUrl } = useSnapshot(appStore);
   return (
     <Text wrap="truncate-end">
       <Text bold color="cyan">
@@ -23,6 +23,16 @@ const Title = memo(function Title(): React.ReactNode {
       </Text>
       <Text dimColor>{" · "}</Text>
       <Text bold>{project}</Text>
+      {boardUrl !== "" && (
+        <>
+          <Text dimColor>{" · ⎇ "}</Text>
+          {/* Same treatment as history's PR links: bright + underlined =
+              openable. `b` opens it; cmd+click works where it fits. */}
+          <Text color="cyanBright" underline>
+            {boardUrl}
+          </Text>
+        </>
+      )}
     </Text>
   );
 });

@@ -128,6 +128,9 @@ export class JiraAdapter implements TrackerPort {
       labelIds,
       stateIds,
       projectId: this.componentId ?? undefined,
+      // /browse/<KEY> works on every Jira flavor (team- and company-managed)
+      // and lands on the project's issue view.
+      boardUrl: `https://${this.host}/browse/${project.key}`,
     };
     return this.meta;
   }
