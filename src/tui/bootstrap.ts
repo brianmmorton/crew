@@ -12,7 +12,7 @@ import { LogTail } from "./logTail.js";
 import { stopAllRuns } from "./runManager.js";
 import { appStore, beginStep, endSteps, failBoot } from "./stores/app.js";
 import { setAgents, type AgentItem } from "./stores/agents.js";
-import { appendEngineLines } from "./stores/feed.js";
+import { appendEngineLines, setKnownAgents } from "./stores/feed.js";
 import { mcpStore, type McpStatus } from "./stores/mcp.js";
 import { poolStore, takeTrackerDirty, type SlotView, type StuckView } from "./stores/pool.js";
 import { tickClock } from "./stores/clock.js";
@@ -66,7 +66,11 @@ export async function startBackground(cfg: CrewConfig): Promise<void> {
 
     beginStep("mustering agents & connecting tracker");
     ports = await buildPorts(cfg);
-    setAgents(buildAgentItems(ports));
+    const items = buildAgentItems(ports);
+    setAgents(items);
+    // Tell the feed who the agents are, so engine log lines about an agent
+    // get attributed (and colored) before the seed lines are parsed below.
+    setKnownAgents(items.map((a) => a.name));
 
     beginStep("checking MCP moorings");
     publishMcp(cfg, ports);
@@ -269,4 +273,5 @@ function setAgentsIfChanged(items: AgentItem[]): void {
   if (shape === lastAgentsShape) return;
   lastAgentsShape = shape;
   setAgents(items);
+  setKnownAgents(items.map((a) => a.name));
 }

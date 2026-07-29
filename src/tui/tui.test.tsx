@@ -32,6 +32,7 @@ import {
   appendEngineLines,
   feedStore,
   resetFeedStore,
+  setKnownAgents,
   MAX_FEED_LINES,
 } from "./stores/feed.js";
 import { poolStore, resetPoolStore, invalidateTrackerCounts, takeTrackerDirty } from "./stores/pool.js";
@@ -178,14 +179,32 @@ test("feed store: parses engine lines, tags agent lines, caps the ring", () => {
   assert.equal(engine!.level, "info");
   assert.equal(engine!.time, "10:11:12");
   assert.equal(engine!.text, "executor idle: nothing ready");
+  assert.equal(engine!.source, null); // "executor" is not a known agent here
   assert.equal(raw!.level, null);
   assert.equal(agent!.source, "qa");
+  assert.equal(agent!.origin, "run");
 
   appendEngineLines(Array.from({ length: MAX_FEED_LINES + 10 }, (_, i) => `x${i}`));
   assert.equal(feedStore.lines.length, MAX_FEED_LINES);
   // ids stay unique + monotonic after the splice
   const ids = feedStore.lines.map((l) => l.id);
   assert.equal(new Set(ids).size, ids.length);
+});
+
+test("feed store: engine lines with a known agent prefix are attributed to it", () => {
+  setKnownAgents(["design", "qa"]);
+  appendEngineLines([
+    "2026-07-28T10:00:00.000Z INFO design: starting run (a headless agent analyzes the repo)…",
+    "2026-07-28T10:00:01.000Z INFO design → Bash ls apps/web",
+    "2026-07-28T10:00:02.000Z INFO qa finished",
+    "2026-07-28T10:00:03.000Z INFO starting design (crew once design)", // mid-line ≠ attribution
+    "2026-07-28T10:00:04.000Z INFO designer stopped", // prefix must be the WHOLE word
+  ]);
+  assert.deepEqual(
+    feedStore.lines.map((l) => l.source),
+    ["design", "design", "qa", null, null],
+  );
+  assert.ok(feedStore.lines.every((l) => l.origin === "engine"));
 });
 
 test("pool store: tracker dirty flag reads once", () => {
@@ -293,15 +312,18 @@ test("render: expanded executor pane lists stuck work", () => {
 test("render: feed interleaves engine and agent lines in arrival order", () => {
   appStore.rows = 30;
   seedAgents(["qa"]);
+  setKnownAgents(["qa"]);
   appendEngineLines(["2026-07-28T10:00:00.000Z INFO loop started"]);
+  appendEngineLines(["2026-07-28T10:00:00.000Z INFO qa: starting run"]);
   appendAgentLines("qa", ["scanning routes"]);
 
   const { lastFrame, unmount } = render(<Dashboard />);
   const frame = clean(lastFrame());
   unmount();
   const loopAt = frame.indexOf("loop started");
+  const runAt = frame.indexOf("qa: starting run");
   const scanAt = frame.indexOf("scanning routes");
-  assert.ok(loopAt >= 0 && scanAt >= 0 && loopAt < scanAt);
+  assert.ok(loopAt >= 0 && runAt >= 0 && scanAt >= 0 && loopAt < runAt && runAt < scanAt);
 });
 
 test("render: loading splash shows boat, steps, and stays frame-pinned", () => {

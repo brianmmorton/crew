@@ -31,7 +31,7 @@ export const Feed = memo(function Feed({ height }: { height: number }): React.Re
 });
 
 const FeedRow = memo(function FeedRow({ line }: { line: FeedLine }): React.ReactNode {
-  if (line.source) {
+  if (line.origin === "run" && line.source) {
     // An agent run's raw output, tagged and tinted by owner.
     return (
       <Text wrap="truncate-end">
@@ -44,13 +44,27 @@ const FeedRow = memo(function FeedRow({ line }: { line: FeedLine }): React.React
     );
   }
   if (line.level) {
+    // Engine log line. When it's attributed to an agent (leading "<name>:" /
+    // "<name> →"), paint the name in that agent's color — the same color its
+    // row wears in the panel above, so stream and roster read as one system.
+    const attributed = line.source && line.text.startsWith(line.source);
     return (
       <Text wrap="truncate-end">
         <Text dimColor> {line.time} </Text>
         <Text color={LEVEL_COLOR[line.level]} bold={line.level !== "info"}>
           {line.level.toUpperCase().padEnd(5)}
         </Text>
-        <Text> {line.text}</Text>
+        <Text> </Text>
+        {attributed ? (
+          <>
+            <Text color={agentColor(line.source!)} bold>
+              {line.source}
+            </Text>
+            <Text>{line.text.slice(line.source!.length)}</Text>
+          </>
+        ) : (
+          <Text>{line.text}</Text>
+        )}
       </Text>
     );
   }
