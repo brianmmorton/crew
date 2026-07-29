@@ -1,76 +1,120 @@
-import React from "react";
+import { memo } from "react";
 import { Box, Text } from "ink";
 import { useSnapshot } from "valtio";
-import type { Snapshot } from "./snapshot.js";
-import { Logo } from "./Logo.js";
-import { store } from "./store.js";
-import type { DeepReadonly } from "./deepReadonly.js";
-import { useRenderTrace } from "./useRenderTrace.js";
-
-function poolCounts(slots: DeepReadonly<Snapshot["slots"]>): string | null {
-  if (!slots) return null;
-  const count = (s: string) => slots.filter((x) => x.state === s).length;
-  return `${count("free")} free  ${count("busy")} busy  ${count("retained")} retained`;
-}
+import { appStore } from "./stores/app.js";
+import { poolStore } from "./stores/pool.js";
+import { mcpStore } from "./stores/mcp.js";
 
 /**
- * Reads only store.snap and store.headerLogo — re-renders independently of
- * AgentList/LogPanel. Memoized (no props) so Screen's own re-renders (e.g.
- * on store.rows changing) don't cascade into this subtree too.
+ * Two fixed lines. Split into three memoized islands so each re-renders only
+ * on ITS store's changes: title (never), board counts (~60s), pool/MCP state
+ * (on user action or login change).
  */
-export const Header = React.memo(function Header() {
-  const { snap, headerLogo: logoArt } = useSnapshot(store);
-  useRenderTrace("Header", { snap, logoArt });
-  if (!snap) return null;
-  const pool = poolCounts(snap.slots);
+
+const SLOT_GLYPH = { free: "▢", busy: "▣", retained: "▲" } as const;
+const SLOT_COLOR = { free: undefined, busy: "yellow", retained: "red" } as const;
+
+const Title = memo(function Title(): React.ReactNode {
+  const project = useSnapshot(appStore).project;
   return (
-    <Box flexDirection="column" marginBottom={1}>
-      {logoArt && <Logo art={logoArt} />}
-      <Box>
-        {!logoArt && (
-          <Text bold color="cyan">
-            crew
-          </Text>
-        )}
-        <Text dimColor>  {snap.cfg.project}</Text>
-        <Text dimColor>  ·  {snap.cfg.repo.path.split("/").pop()}</Text>
-        <Box flexGrow={1} />
-        <Text color={snap.supervisorAlive ? "green" : "yellow"}>
-          {snap.supervisorAlive ? "● running" : "○ not running"}
-        </Text>
-      </Box>
-      <Box>
-        <Text dimColor>backlog </Text>
-        <Text>
-          {snap.backlog}/{snap.cfg.triager.backlogCap}
-        </Text>
-        <Text dimColor>   wip </Text>
-        <Text>
-          {snap.inProgress}/{snap.cfg.gates.wipCap}
-        </Text>
-        {pool && (
-          <>
-            <Text dimColor>   pool </Text>
-            <Text>{pool}</Text>
-          </>
-        )}
-      </Box>
-      {snap.mcpOAuth.length > 0 && (
-        <Box>
-          <Text dimColor>mcp </Text>
-          {snap.mcpOAuth.map((row, i) => (
-            <Text key={row.server}>
-              {i > 0 && <Text dimColor>  </Text>}
-              <Text color={row.loggedIn ? "green" : "yellow"}>
-                {row.loggedIn ? "●" : "○"} {row.server}
-              </Text>
-            </Text>
-          ))}
-          {snap.mcpOAuth.some((r) => !r.loggedIn) && (
-            <Text dimColor>   (crew mcp login &lt;server&gt;)</Text>
-          )}
-        </Box>
-      )}
-    </Box>
+    <Text wrap="truncate-end">
+      <Text bold color="cyan">
+        {" ⚓ crew"}
+      </Text>
+      <Text dimColor>{" · "}</Text>
+      <Text bold>{project}</Text>
+    </Text>
   );
 });
+
+const Board = memo(function Board(): React.ReactNode {
+  const pool = useSnapshot(poolStore);
+  const stuck = pool.stuck.length;
+  return (
+    <Text wrap="truncate-end">
+      <Text dimColor>backlog </Text>
+      <Text color="blueBright">{pool.backlog}</Text>
+      <Text dimColor>{"  wip "}</Text>
+      <Text color={pool.inProgress >= pool.wipCap ? "yellow" : "magentaBright"}>
+        {pool.inProgress}/{pool.wipCap}
+      </Text>
+      {stuck > 0 && (
+        <>
+          <Text dimColor>{"  stuck "}</Text>
+          <Text color="red" bold>
+            {stuck}
+          </Text>
+        </>
+      )}
+      {pool.supervisorAlive && <Text color="yellow">{"  ⚠ supervisor also running"}</Text>}
+      <Text> </Text>
+    </Text>
+  );
+});
+
+const PoolLine = memo(function PoolLine(): React.ReactNode {
+  const pool = useSnapshot(poolStore);
+  return (
+    <Text wrap="truncate-end">
+      {pool.executorPaused ? (
+        <Text color="yellow" bold>
+          {" ⏸ pool paused"}
+        </Text>
+      ) : (
+        <Text color="green">{" ▶ pool active"}</Text>
+      )}
+      <Text dimColor>
+        {" · "}
+        {pool.workers} worker{pool.workers === 1 ? "" : "s"}
+      </Text>
+      {pool.slots && (
+        <>
+          <Text dimColor>{" · slots "}</Text>
+          {pool.slots.map((s) => (
+            <Text key={s.slot} color={SLOT_COLOR[s.state]} dimColor={s.state === "free"}>
+              {SLOT_GLYPH[s.state]}
+            </Text>
+          ))}
+        </>
+      )}
+    </Text>
+  );
+});
+
+const McpLine = memo(function McpLine(): React.ReactNode {
+  const servers = useSnapshot(mcpStore).servers;
+  return (
+    <Text wrap="truncate-end">
+      <Text dimColor>mcp </Text>
+      {servers.length === 0 && <Text dimColor>none</Text>}
+      {servers.map((s, i) => (
+        <Text key={s.server}>
+          {i > 0 && <Text dimColor> </Text>}
+          {s.loggedIn === null ? (
+            <Text color="cyan">● {s.server}</Text>
+          ) : s.loggedIn ? (
+            <Text color="green">● {s.server}</Text>
+          ) : (
+            <Text color="red">○ {s.server}</Text>
+          )}
+        </Text>
+      ))}
+      <Text> </Text>
+    </Text>
+  );
+});
+
+export function Header(): React.ReactNode {
+  return (
+    <Box flexDirection="column" height={2} flexShrink={0}>
+      <Box justifyContent="space-between">
+        <Title />
+        <Board />
+      </Box>
+      <Box justifyContent="space-between">
+        <PoolLine />
+        <McpLine />
+      </Box>
+    </Box>
+  );
+}

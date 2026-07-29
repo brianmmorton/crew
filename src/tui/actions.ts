@@ -1,0 +1,137 @@
+import { setPaused, wakeExecutor } from "../engine/loop.js";
+import { logger } from "../util/logger.js";
+import type { Action } from "./keys.js";
+import {
+  agentsStore,
+  moveSelection,
+  selectedAgent,
+  toggleExpanded,
+  type AgentItem,
+} from "./stores/agents.js";
+import { poolStore } from "./stores/pool.js";
+import { runsStore } from "./stores/runs.js";
+import { startRun, stopRun, toggleRunPause } from "./runManager.js";
+
+/**
+ * The intent layer between keys.ts and the stores/engine. Every user-visible
+ * consequence of a keypress goes through here, and every action narrates
+ * itself through the logger — which lands in the OUTPUT panel, so the UI
+ * always answers "did that keypress do anything?".
+ */
+
+export function dispatch(action: Action, exit: () => void): void {
+  switch (action.type) {
+    case "up":
+      moveSelection(-1);
+      return;
+    case "down":
+      moveSelection(1);
+      return;
+    case "toggle-expand": {
+      const agent = selectedAgent();
+      if (agent) toggleExpanded(agent.name);
+      return;
+    }
+    case "collapse-all":
+      agentsStore.expanded = {};
+      return;
+    case "run-selected": {
+      const agent = selectedAgent();
+      if (agent) runAgent(agent);
+      return;
+    }
+    case "run-index": {
+      const agent = agentsStore.items[action.index];
+      if (agent) {
+        agentsStore.selected = action.index;
+        runAgent(agent);
+      }
+      return;
+    }
+    case "pause-agent": {
+      const agent = selectedAgent();
+      if (agent) pauseAgent(agent);
+      return;
+    }
+    case "pause-pool":
+      togglePoolPause();
+      return;
+    case "stop-agent": {
+      const agent = selectedAgent();
+      const status = agent && runsStore.byAgent[agent.name]?.status;
+      if (agent && (status === "running" || status === "paused")) {
+        logger.info(`stopping ${agent.name}'s run`);
+        stopRun(agent.name);
+      }
+      return;
+    }
+    case "quit":
+      exit();
+      return;
+  }
+}
+
+/**
+ * "Run now". Proposers spawn a real `crew once` cycle; the executor is nudged
+ * in-process (spawning a second executor would just race the loop for the
+ * same claims); reviewers only ever run after a PR opens.
+ */
+function runAgent(agent: AgentItem): void {
+  switch (agent.kind) {
+    case "executor":
+      if (poolStore.executorPaused) {
+        poolStore.executorPaused = false;
+        setPaused(false);
+      }
+      wakeExecutor();
+      logger.info(`${agent.name} nudged — claiming the next ready item`);
+      return;
+    case "reviewer":
+      logger.info(`${agent.name} is a reviewer — it runs automatically after a PR opens`);
+      return;
+    default:
+      if (runsStore.byAgent[agent.name]?.status === "running") {
+        logger.info(`${agent.name} is already running`);
+        return;
+      }
+      logger.info(`starting ${agent.name} (crew once ${agent.name})`);
+      startRun(agent.name);
+      agentsStore.expanded[agent.name] = true;
+  }
+}
+
+/**
+ * Space on an agent: freeze/thaw its live run (SIGSTOP/SIGCONT). On the
+ * executor row — which has no child process — it pauses the pool instead,
+ * so "pause the thing under the cursor" always does the obvious thing.
+ */
+function pauseAgent(agent: AgentItem): void {
+  if (agent.kind === "executor") {
+    togglePoolPause();
+    return;
+  }
+  const status = runsStore.byAgent[agent.name]?.status;
+  if (status !== "running" && status !== "paused") {
+    logger.info(`${agent.name} has no live run to pause`);
+    return;
+  }
+  toggleRunPause(agent.name);
+  logger.info(status === "running" ? `${agent.name} paused (SIGSTOP)` : `${agent.name} resumed`);
+}
+
+/**
+ * Pause the worker pool: workers finish the cycle they're on but claim no
+ * NEW work until resumed. Resume also wakes any worker sleeping out a poll
+ * interval, so it picks work up immediately.
+ */
+export function togglePoolPause(): void {
+  const next = !poolStore.executorPaused;
+  poolStore.executorPaused = next;
+  setPaused(next);
+  if (next) {
+    logger.info("worker pool paused — finishing in-flight cycles, claiming no new work");
+  } else {
+    wakeExecutor();
+    logger.info("worker pool resumed");
+  }
+}

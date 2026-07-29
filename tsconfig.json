@@ -16,15 +16,12 @@
     "jsx": "react-jsx"
   },
   "include": ["src/**/*"],
-  // Tests and the story browser are dev-only: they run from a checkout via
-  // tsx (`npm test`, `npm run stories`) and must stay out of dist/, which is
-  // what package.json `files` publishes.
+  // Tests are dev-only: they run from a checkout via tsx (`npm test`) and
+  // must stay out of dist/, which is what package.json `files` publishes.
   "exclude": [
     "node_modules",
     "dist",
     "src/**/*.test.ts",
-    "src/**/*.test.tsx",
-    "src/tui/stories.tsx",
-    "src/tui/storybook.tsx"
+    "src/**/*.test.tsx"
   ]
 }

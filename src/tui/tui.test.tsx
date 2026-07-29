@@ -1,324 +1,330 @@
-import test from "node:test";
-import assert from "node:assert/strict";
+// Tests are excluded from tsconfig (they never ship), so tsx transpiles this
+// file's JSX with the classic runtime — the explicit React import is required
+// here even though src files use the automatic runtime.
 import React from "react";
+import { test, beforeEach } from "node:test";
+import assert from "node:assert/strict";
 import { render } from "ink-testing-library";
-import { Screen } from "./App.js";
-import { RunView } from "./RunView.js";
-import { stories, getStory, applyStory } from "./stories.js";
-import { store } from "./store.js";
+import { keyToAction } from "./keys.js";
+import { computeLayout, fmtElapsed, fmtUntil, windowStart, MIN_FEED, PANE_MIN } from "./layout.js";
+import { agentColor } from "./palette.js";
+import { appStore, beginStep, endSteps, failBoot, resetAppStore } from "./stores/app.js";
+import {
+  agentsStore,
+  moveSelection,
+  resetAgentsStore,
+  setAgents,
+  toggleExpanded,
+  type AgentItem,
+} from "./stores/agents.js";
+import {
+  appendRunOutput,
+  beginRun,
+  resetRunsStore,
+  runOutputStore,
+  runsStore,
+  setRunStatus,
+  MAX_RUN_LINES,
+} from "./stores/runs.js";
+import {
+  appendAgentLines,
+  appendEngineLines,
+  feedStore,
+  resetFeedStore,
+  MAX_FEED_LINES,
+} from "./stores/feed.js";
+import { poolStore, resetPoolStore, invalidateTrackerCounts, takeTrackerDirty } from "./stores/pool.js";
+import { resetMcpStore, mcpStore } from "./stores/mcp.js";
+import { Dashboard } from "./Dashboard.js";
+import { Loading } from "./Loading.js";
+import { ErrorScreen } from "./ErrorScreen.js";
 
-/**
- * Renders one story through the real Screen tree and returns the frame with
- * ANSI escapes stripped, so assertions can be written against what a person
- * would actually see on the terminal.
- */
-function frameFor(name: string): string {
-  const story = getStory(name);
-  assert.ok(story, `no story named ${name}`);
-  applyStory(story);
-  const { lastFrame, unmount } = render(<Screen implWorkers={1} />);
-  const out = lastFrame() ?? "";
-  unmount();
-  // eslint-disable-next-line no-control-regex
-  return out.replace(/\[[0-9;]*m/g, "");
+beforeEach(() => {
+  resetAppStore();
+  resetAgentsStore();
+  resetRunsStore();
+  resetFeedStore();
+  resetPoolStore();
+  resetMcpStore();
+});
+
+function seedAgents(names: string[], kinds?: string[]): void {
+  setAgents(
+    names.map(
+      (name, i): AgentItem => ({
+        name,
+        kind: (kinds?.[i] ?? "proposer") as AgentItem["kind"],
+        cadence: "0 9 * * *",
+        nextRun: Date.now() + 3_600_000,
+      }),
+    ),
+  );
 }
 
-test("every story renders without throwing and produces output", () => {
-  for (const story of stories) {
-    const frame = frameFor(story.name);
-    assert.ok(frame.length > 0, `story "${story.name}" rendered nothing`);
-  }
+// ----------------------------- keys ----------------------------------------
+
+test("keys: navigation, expand, run, pause, stop, quit all map", () => {
+  assert.deepEqual(keyToAction("", { upArrow: true }), { type: "up" });
+  assert.deepEqual(keyToAction("k", {}), { type: "up" });
+  assert.deepEqual(keyToAction("", { downArrow: true }), { type: "down" });
+  assert.deepEqual(keyToAction("j", {}), { type: "down" });
+  assert.deepEqual(keyToAction("", { return: true }), { type: "toggle-expand" });
+  assert.deepEqual(keyToAction("", { rightArrow: true }), { type: "toggle-expand" });
+  assert.deepEqual(keyToAction("", { escape: true }), { type: "collapse-all" });
+  assert.deepEqual(keyToAction("r", {}), { type: "run-selected" });
+  assert.deepEqual(keyToAction("3", {}), { type: "run-index", index: 2 });
+  assert.deepEqual(keyToAction(" ", {}), { type: "pause-agent" });
+  assert.deepEqual(keyToAction("p", {}), { type: "pause-pool" });
+  assert.deepEqual(keyToAction("x", {}), { type: "stop-agent" });
+  assert.deepEqual(keyToAction("q", {}), { type: "quit" });
+  assert.deepEqual(keyToAction("c", { ctrl: true }), { type: "quit" });
+  assert.equal(keyToAction("z", {}), null);
 });
 
-test("the loading story shows the splash and no dashboard chrome", () => {
-  const frame = frameFor("loading");
-  assert.match(frame, /reading agents, tracker, and worktree pool/);
-  assert.doesNotMatch(frame, /AGENTS/);
-});
+// ----------------------------- layout --------------------------------------
 
-/**
- * Just the AGENTS block. Agent names also occur in log lines and the footer
- * hint ("pause/resume implementer"), so counting rows across the whole frame
- * would match those too.
- */
-function agentBlock(frame: string): string[] {
-  const lines = frame.split("\n");
-  const start = lines.findIndex((l) => l.trim() === "AGENTS");
-  if (start === -1) return [];
-  const rest = lines.slice(start + 1);
-  const end = rest.findIndex((l) => l.trim() === "");
-  return end === -1 ? rest : rest.slice(0, end);
-}
-
-test("the dashboard lists every agent exactly once", () => {
-  const block = agentBlock(frameFor("dashboard"));
-  for (const name of ["architect", "design", "qa", "implementer"]) {
-    const hits = block.filter((l) => l.includes(name)).length;
-    assert.equal(hits, 1, `expected one row for ${name}, saw ${hits}`);
-  }
-});
-
-test("a reviewer that also has a cadence is listed once, not twice", () => {
-  // scheduledAgents() is "not an executor and has a cadence", so a scheduled
-  // reviewer matches both that pass and the reviewer pass in takeSnapshot.
-  // It used to render twice, with duplicate keys and two selection cursors.
-  const block = agentBlock(frameFor("scheduled-reviewer"));
-  const hits = block.filter((l) => l.includes("critic")).length;
-  assert.equal(hits, 1, `expected one row for critic, saw ${hits}`);
-});
-
-test("exactly one selection cursor is drawn", () => {
-  for (const name of ["dashboard", "scheduled-reviewer", "selection-last", "in-flight"]) {
-    const cursors = (frameFor(name).match(/❯/g) ?? []).length;
-    assert.equal(cursors, 1, `story "${name}" drew ${cursors} cursors`);
-  }
-});
-
-test("a selection index past the end of the list still draws one cursor", () => {
-  // The row list can shrink between polls; a stale index must clamp rather
-  // than leave the list with no cursor at all.
-  const cursors = (frameFor("selection-overflow").match(/❯/g) ?? []).length;
-  assert.equal(cursors, 1);
-});
-
-test("the executor row shows paused instead of a spinner when paused", () => {
-  const frame = frameFor("paused");
-  assert.match(frame, /paused/);
-  assert.doesNotMatch(frame, /running \(1w\)/);
-});
-
-test("a snapshot error renders the error frame and nothing else", () => {
-  const frame = frameFor("error");
-  assert.match(frame, /Rate limit exceeded/);
-  assert.doesNotMatch(frame, /AGENTS/);
-  assert.doesNotMatch(frame, /LOG/);
-});
-
-test("stuck items render with their state and reason", () => {
-  const frame = frameFor("in-flight");
-  assert.match(frame, /IN FLIGHT \(3\)/);
-  assert.match(frame, /1 abandoned/);
-  assert.match(frame, /SCO-138/);
-  assert.match(frame, /typecheck failed/);
-});
-
-test("the log panel renders parsed and unparsed lines", () => {
-  const frame = frameFor("dashboard");
-  assert.match(frame, /LOG/);
-  assert.match(frame, /crew executor loop started/);
-  // A line that doesn't match the timestamp/level format still shows up.
-  assert.match(frame, /a line that does not match the log format/);
-});
-
-test("mcp oauth rows show login state and the fix hint", () => {
-  const frame = frameFor("mcp-oauth");
-  assert.match(frame, /linear/);
-  assert.match(frame, /sentry/);
-  assert.match(frame, /crew mcp login/);
-});
-
-test("worktree pool counts render in the header", () => {
-  const frame = frameFor("pool");
-  assert.match(frame, /1 free/);
-  assert.match(frame, /1 busy/);
-  assert.match(frame, /1 retained/);
-});
-
-test("an expanded run shows its output and the run-view footer", () => {
-  const frame = frameFor("run-view");
-  assert.match(frame, /design/);
-  assert.match(frame, /reading AGENTS\.md/);
-  assert.match(frame, /back to dashboard/);
-  // The dashboard chrome must be replaced, not drawn underneath.
-  assert.doesNotMatch(frame, /AGENTS\n/);
-});
-
-test("a failed run shows its exit code", () => {
-  const frame = frameFor("run-view-failed");
-  assert.match(frame, /failed/);
-  assert.match(frame, /exit 1/);
-});
-
-test("finished runs show done and failed badges in the agent list", () => {
-  const frame = frameFor("run-badge");
-  assert.match(frame, /done/);
-  assert.match(frame, /failed/);
-});
-
-test("expanded pointing at a run that does not exist falls back to the dashboard", () => {
-  // Clearing store.expanded during render would re-enter the renderer and
-  // tear the frame, so a stale name has to fall through instead.
-  applyStory(getStory("dashboard")!);
-  store.expanded = "nonexistent";
-  const { lastFrame, unmount } = render(<Screen implWorkers={1} />);
-  const frame = (lastFrame() ?? "").replace(/\[[0-9;]*m/g, "");
-  unmount();
-  assert.match(frame, /AGENTS/);
-  assert.doesNotMatch(frame, /back to dashboard/);
-});
-
-test("the frame never grows taller than the terminal", () => {
-  // A frame taller than the window scrolls its own top away, which on screen
-  // reads as the UI repeating itself. Checked across the awkward range where
-  // the log panel has to shrink and then drop out entirely.
-  for (const rows of [8, 10, 12, 14, 16, 20, 24, 30, 40]) {
-    for (const storyName of ["dashboard", "in-flight", "mcp-oauth"]) {
-      applyStory(getStory(storyName)!);
-      store.rows = rows;
-      const { lastFrame, unmount } = render(<Screen implWorkers={1} />);
-      const frame = (lastFrame() ?? "").replace(/\[[0-9;]*m/g, "");
-      unmount();
-      const used = frame.split("\n").length;
-      assert.ok(
-        used <= rows,
-        `story "${storyName}" at rows=${rows} rendered ${used} lines`,
-      );
-    }
-  }
-});
-
-test("a tall terminal gives the log panel the extra room", () => {
-  applyStory(getStory("dashboard")!);
-  store.rows = 40;
-  const { lastFrame, unmount } = render(<Screen implWorkers={1} />);
-  const frame = (lastFrame() ?? "").replace(/\[[0-9;]*m/g, "");
-  unmount();
-  assert.match(frame, /LOG/);
-  assert.match(frame, /crew executor loop started/);
-});
-
-test("a short terminal drops the log panel rather than overflowing", () => {
-  const frame = frameFor("narrow");
-  assert.ok(frame.split("\n").length <= 12, "narrow frame overflowed");
-  // The log is the first thing to yield when there is no room for it.
-  assert.doesNotMatch(frame, /^LOG$/m);
-  assert.match(frame, /AGENTS/);
-});
-
-test("in-flight work keeps its space ahead of the agent list", () => {
-  // In-flight is what says something is wrong right now; the agent list is
-  // near-static, so it's the one that truncates first on a short window. It
-  // no longer claims *every* spare line though — starving the agent list to
-  // nothing reads as "no agents found" rather than "no room" — so on a 12-row
-  // window the full count is reported and the list itself may be cut.
-  const frame = frameFor("narrow");
-  assert.match(frame, /IN FLIGHT \(3\)/);
-  assert.match(frame, /AGENTS/);
-});
-
-test("a truncated in-flight list drops the healthy item, never the abandoned one", () => {
-  // Truncation takes from the end, so the section is ordered by severity
-  // before it is cut. Showing two working items while hiding an abandoned
-  // claim would defeat the point of the section.
-  const frame = frameFor("narrow");
-  assert.match(frame, /SCO-131\s+abandoned/); // abandoned survives
-  assert.match(frame, /SCO-138\s+fixing/); // then the one being retried
-  assert.doesNotMatch(frame, /SCO-142/); // the healthy "working" item yields
-  assert.match(frame, /\+1 more/); // and the frame says so
-});
-
-test("a truncated agent list says how many rows are hidden", () => {
-  const frame = frameFor("narrow");
-  assert.match(frame, /AGENTS\s+\(\d+ of 4\)/);
-});
-
-test("a truncated in-flight list says how many items are hidden", () => {
-  applyStory(getStory("in-flight")!);
-  store.rows = 11; // room for the header, a couple of items, and the footer
-  const { lastFrame, unmount } = render(<Screen implWorkers={1} />);
-  const frame = (lastFrame() ?? "").replace(/\[[0-9;]*m/g, "");
-  unmount();
-  assert.ok(frame.split("\n").length <= 11, "frame overflowed");
-  // Either everything fit, or the ones that didn't are accounted for.
-  if (!frame.includes("SCO-131")) assert.match(frame, /\+\d+ more/);
-});
-
-/**
- * Frame height is the root cause of every flicker bug this file guards, in two
- * distinct ways.
- *
- * Absolute height (this test and the next): Ink repaints in place with a
- * relative "cursor up N", which cannot address rows that have scrolled off — so
- * a frame occupying the terminal's last row scrolls on the next newline and
- * every later repaint lands a row low.
- *
- * *Changes* in height (the test after those): the ladder in the reported bug.
- * A frame that grows between paints moves the block's anchor regardless of how
- * much headroom it has, so staying inside `rows` is necessary but not
- * sufficient — the run view must also not change height as output streams in.
- */
-test("the dashboard frame never reaches the bottom of the terminal", () => {
-  for (const rows of [8, 12, 24, 53, 120]) {
-    applyStory(getStory("dashboard")!);
-    store.rows = rows;
-    const { lastFrame, unmount } = render(<Screen implWorkers={1} />);
-    // eslint-disable-next-line no-control-regex
-    const frame = (lastFrame() ?? "").replace(/\[[0-9;]*m/g, "");
-    unmount();
-    const height = frame.split("\n").length;
-    assert.ok(height < rows, `dashboard used ${height} of ${rows} rows — leaves no scroll headroom`);
-  }
-});
-
-/**
- * The direct regression test for the stacked-spinner ladder. The run view has
- * to be exactly as tall with 500 streamed lines as it is with none: a frame
- * that grows by a line moves Ink's repaint anchor down by a line, and the
- * spinner then redraws one row lower on every 120ms tick. This is checked
- * independently of `rows` headroom because growth ladders at any height.
- */
-test("the run view holds a constant height as output streams in", () => {
-  for (const rows of [12, 24, 53]) {
+test("layout: frame height is constant regardless of accordion state", () => {
+  for (const rows of [20, 24, 40, 60]) {
     const heights = new Set<number>();
-    for (const n of [0, 1, 2, 5, 60, 500]) {
-      applyStory(getStory("dashboard")!);
-      store.rows = rows;
-      store.runs.set("qa", {
-        agent: "qa",
-        status: "running",
-        startedAt: new Date(),
-        endedAt: null,
-        lines: Array.from({ length: n }, (_, i) => `output line ${i}`),
-        exitCode: null,
-      } as never);
-      store.expanded = "qa";
-      const { lastFrame, unmount } = render(<RunView agent="qa" height={rows - 1} />);
-      // eslint-disable-next-line no-control-regex
-      const frame = (lastFrame() ?? "").replace(/\[[0-9;]*m/g, "");
-      unmount();
-      heights.add(frame.split("\n").length);
+    for (const expanded of [0, 1, 2, 3]) {
+      heights.add(computeLayout(rows, 5, expanded).frameH);
     }
-    assert.equal(
-      heights.size,
-      1,
-      `run view changed height across output volumes at rows=${rows}: saw ${[...heights].join(", ")} — the spinner will ladder`,
-    );
+    assert.equal(heights.size, 1, `frameH varied at rows=${rows}`);
   }
 });
 
-test("an expanded run view leaves headroom however much the agent streams", () => {
-  for (const rows of [8, 12, 24, 53, 120]) {
-    for (const n of [0, 1, 5, 60, 500]) {
-      applyStory(getStory("dashboard")!);
-      store.rows = rows;
-      store.runs.set("qa", {
-        agent: "qa",
-        status: "running",
-        startedAt: new Date(),
-        endedAt: null,
-        lines: Array.from({ length: n }, (_, i) => `output line ${i}`),
-        exitCode: null,
-      } as never);
-      store.expanded = "qa";
-      const { lastFrame, unmount } = render(<Screen implWorkers={1} />);
-      // eslint-disable-next-line no-control-regex
-      const frame = (lastFrame() ?? "").replace(/\[[0-9;]*m/g, "");
-      unmount();
-      const height = frame.split("\n").length;
-      assert.ok(
-        height < rows,
-        `run view used ${height} of ${rows} rows with ${n} output lines — the spinner will stack`,
-      );
-    }
+test("layout: expanding panes takes rows from the feed, total stays balanced", () => {
+  const rows = 40;
+  const agentCount = 5;
+  for (const expanded of [0, 1, 2]) {
+    const l = computeLayout(rows, agentCount, expanded);
+    // header(2) + titles(2) + footer(1) + list + panes + feed === frame
+    const used = 5 + l.listRows + expanded * l.paneH + l.feedH;
+    assert.equal(used, l.frameH, `unbalanced at expanded=${expanded}`);
+    assert.ok(l.feedH >= 1);
   }
+});
+
+test("layout: feed keeps minimum rows and panes vanish when too tight", () => {
+  const tight = computeLayout(14, 6, 4);
+  assert.equal(tight.paneH, 0); // no room — markers only
+  assert.ok(tight.feedH >= 1);
+  const roomy = computeLayout(50, 3, 1);
+  assert.ok(roomy.paneH >= PANE_MIN);
+  assert.ok(roomy.feedH >= MIN_FEED);
+});
+
+test("layout: windowStart keeps the selection visible", () => {
+  assert.equal(windowStart(3, 5, 2), 0); // fits — no scroll
+  assert.equal(windowStart(20, 5, 0), 0);
+  assert.equal(windowStart(20, 5, 19), 15); // clamped to the end
+  const mid = windowStart(20, 5, 10);
+  assert.ok(mid <= 10 && 10 < mid + 5);
+});
+
+test("layout: elapsed/until formatting", () => {
+  assert.equal(fmtElapsed(0, 65_000), "01:05");
+  assert.equal(fmtElapsed(0, 3_600_000), "1:00:00");
+  assert.equal(fmtUntil(Date.now() - 1000, Date.now()), "due");
+  assert.equal(fmtUntil(Date.now() + 30 * 60_000, Date.now()), "in 30m");
+});
+
+// ----------------------------- palette -------------------------------------
+
+test("palette: agent colors are stable across calls", () => {
+  assert.equal(agentColor("qa"), agentColor("qa"));
+});
+
+// ----------------------------- stores --------------------------------------
+
+test("agents store: selection clamps at both ends and expansion toggles", () => {
+  seedAgents(["a", "b", "c"]);
+  moveSelection(-1);
+  assert.equal(agentsStore.selected, 0);
+  moveSelection(1);
+  moveSelection(1);
+  moveSelection(1);
+  assert.equal(agentsStore.selected, 2); // clamped
+  toggleExpanded("b");
+  assert.equal(agentsStore.expanded["b"], true);
+  toggleExpanded("b");
+  assert.equal(agentsStore.expanded["b"], false);
+});
+
+test("agents store: shrinking the roster pulls the cursor back in range", () => {
+  seedAgents(["a", "b", "c"]);
+  agentsStore.selected = 2;
+  seedAgents(["a"]);
+  assert.equal(agentsStore.selected, 0);
+});
+
+test("runs store: lifecycle and output cap", () => {
+  beginRun("qa");
+  assert.equal(runsStore.byAgent["qa"]!.status, "running");
+  appendRunOutput("qa", Array.from({ length: MAX_RUN_LINES + 50 }, (_, i) => `l${i}`));
+  assert.equal(runOutputStore.byAgent["qa"]!.length, MAX_RUN_LINES);
+  setRunStatus("qa", "done", 0);
+  assert.equal(runsStore.byAgent["qa"]!.status, "done");
+  assert.equal(runsStore.byAgent["qa"]!.exitCode, 0);
+  assert.ok(runsStore.byAgent["qa"]!.endedAt !== null);
+});
+
+test("feed store: parses engine lines, tags agent lines, caps the ring", () => {
+  appendEngineLines(["2026-07-28T10:11:12.000Z INFO executor idle: nothing ready"]);
+  appendEngineLines(["not a log line"]);
+  appendAgentLines("qa", ["found a bug"]);
+  const [engine, raw, agent] = feedStore.lines;
+  assert.equal(engine!.level, "info");
+  assert.equal(engine!.time, "10:11:12");
+  assert.equal(engine!.text, "executor idle: nothing ready");
+  assert.equal(raw!.level, null);
+  assert.equal(agent!.source, "qa");
+
+  appendEngineLines(Array.from({ length: MAX_FEED_LINES + 10 }, (_, i) => `x${i}`));
+  assert.equal(feedStore.lines.length, MAX_FEED_LINES);
+  // ids stay unique + monotonic after the splice
+  const ids = feedStore.lines.map((l) => l.id);
+  assert.equal(new Set(ids).size, ids.length);
+});
+
+test("pool store: tracker dirty flag reads once", () => {
+  assert.equal(takeTrackerDirty(), false);
+  invalidateTrackerCounts();
+  assert.equal(takeTrackerDirty(), true);
+  assert.equal(takeTrackerDirty(), false);
+});
+
+test("app store: boot steps advance and failure marks the trailing step", () => {
+  beginStep("one");
+  beginStep("two");
+  assert.deepEqual(
+    appStore.steps.map((s) => s.status),
+    ["done", "active"],
+  );
+  failBoot("boom");
+  assert.equal(appStore.phase, "error");
+  assert.equal(appStore.error, "boom");
+  assert.deepEqual(
+    appStore.steps.map((s) => s.status),
+    ["done", "failed"],
+  );
+  resetAppStore();
+  beginStep("only");
+  endSteps(true);
+  assert.deepEqual(
+    appStore.steps.map((s) => s.status),
+    ["done"],
+  );
+});
+
+// ----------------------------- render smoke --------------------------------
+
+const frameHeight = (frame: string | undefined): number => (frame ?? "").split("\n").length;
+
+test("render: dashboard shows agents, statuses, mcp and legend", () => {
+  appStore.rows = 30;
+  appStore.project = "myproject";
+  seedAgents(["qa", "design", "implementer"], ["proposer", "proposer", "executor"]);
+  poolStore.backlog = 12;
+  poolStore.inProgress = 2;
+  poolStore.wipCap = 3;
+  mcpStore.servers = [
+    { server: "linear", oauth: true, loggedIn: true },
+    { server: "github", oauth: true, loggedIn: false },
+  ];
+  beginRun("qa");
+
+  const { lastFrame, unmount } = render(<Dashboard />);
+  const frame = lastFrame() ?? "";
+  unmount();
+
+  assert.match(frame, /crew/);
+  assert.match(frame, /myproject/);
+  assert.match(frame, /qa/);
+  assert.match(frame, /design/);
+  assert.match(frame, /implementer/);
+  assert.match(frame, /running/); // qa's live run
+  assert.match(frame, /backlog 12/);
+  assert.match(frame, /wip 2\/3/);
+  assert.match(frame, /linear/);
+  assert.match(frame, /github/);
+  assert.match(frame, /q quit/);
+});
+
+test("render: frame height never changes when the accordion opens", () => {
+  appStore.rows = 30;
+  seedAgents(["qa", "design"]);
+  appendRunOutput("qa", ["line one", "line two"]);
+
+  const collapsed = render(<Dashboard />);
+  const hCollapsed = frameHeight(collapsed.lastFrame());
+  collapsed.unmount();
+
+  toggleExpanded("qa");
+  const expanded = render(<Dashboard />);
+  const hExpanded = frameHeight(expanded.lastFrame());
+  const frame = expanded.lastFrame() ?? "";
+  expanded.unmount();
+
+  assert.equal(hExpanded, hCollapsed, "expanding a pane must not grow the frame");
+  assert.match(frame, /line two/); // pane actually shows output
+});
+
+test("render: expanded executor pane lists stuck work", () => {
+  appStore.rows = 30;
+  seedAgents(["implementer"], ["executor"]);
+  poolStore.stuck = [{ identifier: "BRI-7", state: "fixing", reason: "verify failed" }];
+  toggleExpanded("implementer");
+
+  const { lastFrame, unmount } = render(<Dashboard />);
+  const frame = lastFrame() ?? "";
+  unmount();
+  assert.match(frame, /BRI-7/);
+  assert.match(frame, /verify failed/);
+});
+
+test("render: feed interleaves engine and agent lines in arrival order", () => {
+  appStore.rows = 30;
+  seedAgents(["qa"]);
+  appendEngineLines(["2026-07-28T10:00:00.000Z INFO loop started"]);
+  appendAgentLines("qa", ["scanning routes"]);
+
+  const { lastFrame, unmount } = render(<Dashboard />);
+  const frame = lastFrame() ?? "";
+  unmount();
+  const loopAt = frame.indexOf("loop started");
+  const scanAt = frame.indexOf("scanning routes");
+  assert.ok(loopAt >= 0 && scanAt >= 0 && loopAt < scanAt);
+});
+
+test("render: loading splash shows boat, steps, and stays frame-pinned", () => {
+  appStore.rows = 30;
+  beginStep("mustering agents & connecting tracker");
+
+  const { lastFrame, unmount } = render(<Loading />);
+  const frame = lastFrame() ?? "";
+  const h = frameHeight(lastFrame());
+  unmount();
+  assert.match(frame, /c {2}r {2}e {2}w/); // the boat hull
+  assert.match(frame, /mustering agents/);
+  assert.equal(h, 28, "splash must fill the same rows-2 frame as the dashboard");
+});
+
+test("render: error screen shows the failure", () => {
+  appStore.rows = 30;
+  failBoot("Linear API key rejected");
+  const { lastFrame, unmount } = render(<ErrorScreen />);
+  const frame = lastFrame() ?? "";
+  unmount();
+  assert.match(frame, /ran aground/);
+  assert.match(frame, /Linear API key rejected/);
+});
+
+test("render: dashboard fills exactly rows-2", () => {
+  appStore.rows = 26;
+  seedAgents(["qa", "design"]);
+  const { lastFrame, unmount } = render(<Dashboard />);
+  const h = frameHeight(lastFrame());
+  unmount();
+  assert.equal(h, 24);
 });
