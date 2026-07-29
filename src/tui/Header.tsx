@@ -46,7 +46,7 @@ const Board = memo(function Board(): React.ReactNode {
           </Text>
         </>
       )}
-      {pool.supervisorAlive && <Text color="yellow">{"  ⚠ supervisor also running"}</Text>}
+      {pool.supervisorAlive && <Text color="yellow">{"  ⚠ another crew running"}</Text>}
       <Text> </Text>
     </Text>
   );

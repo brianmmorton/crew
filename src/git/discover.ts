@@ -93,7 +93,7 @@ function forgeForHost(host: string): ForgeProvider | null {
  * Walk up from `startDir` looking for a directory containing `dirName` (the
  * crew config dir). Returns the containing directory, or null if the
  * filesystem root is reached without a match — the same upward search git and
- * npm do, so `crew run` works from anywhere inside the repo.
+ * npm do, so `crew` works from anywhere inside the repo.
  */
 export function findConfigRoot(startDir: string, dirName: string): string | null {
   let dir = resolve(startDir);

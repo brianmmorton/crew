@@ -1,9 +1,15 @@
 /**
- * Frame budgeting. Ink 6.8's `incrementalRendering` is only anchor-safe while
- * the frame never GROWS between paints — growth slides the anchor and every
- * later repaint compounds it (the stacked-spinner "ladder"). So the whole
- * screen is built from one constant-height budget: expanding a pane takes
- * rows FROM the feed, never from thin air. tui.test.tsx guards this.
+ * Frame budgeting. `incrementalRendering` repaints lines relative to a cursor
+ * anchor, so the frame must never GROW past the terminal bottom between
+ * paints — the overflow scrolls the terminal and the scrolled-off lines are
+ * left behind as ghosts Ink can no longer erase. So the whole screen is built
+ * from one constant-height budget: expanding a pane takes rows FROM the feed,
+ * never from thin air. tui.test.tsx guards this.
+ *
+ * Requires ink >= 7: 6.8.0's incremental renderer rewound the cursor with
+ * `cursorUp(previousVisible - 1)` — one row short for a frame with a trailing
+ * newline — so EVERY repaint slid the frame down a row, duplicating rows and
+ * stacking ghost header/footer lines. Ink 7 rewinds by the full line count.
  *
  * `rows - 2` (not `rows - 1`): a frame at full height flips Ink into
  * fullscreen mode where it clears the terminal on every paint.
@@ -14,6 +20,35 @@ const CHROME = 5;
 export const MIN_FEED = 3;
 export const PANE_MIN = 3;
 export const PANE_MAX = 8;
+
+/**
+ * Sidebar width budgeting. Unlike the height budget above, this is about
+ * COLUMNS: every row in the main column is built from hard `padEnd` cells
+ * (name 14 + kind 10 + schedule 10, before the status cell), so taking width
+ * away truncates real content rather than whitespace.
+ *
+ * Below SIDEBAR_MIN_COLUMNS the sidebar is simply not drawn — a squeezed
+ * agent row is worse than no history at all.
+ */
+export const SIDEBAR_W = 30;
+export const SIDEBAR_MAX_W = 46;
+export const SIDEBAR_MIN_COLUMNS = 120;
+
+/**
+ * Sidebar width for a terminal width: 0 when too narrow or the user has it
+ * off, otherwise SIDEBAR_W growing with the terminal up to SIDEBAR_MAX_W.
+ *
+ * It grows because the panel's content is text worth reading — PR urls,
+ * failure reasons — and at the 30-column floor most of it truncates. It stops
+ * at SIDEBAR_MAX_W so a very wide terminal doesn't hand the sidebar space the
+ * agent rows and feed can use better. Pure, so the thresholds are tested
+ * rather than eyeballed.
+ */
+export function sidebarWidth(columns: number, visible: boolean): number {
+  if (!visible || columns < SIDEBAR_MIN_COLUMNS) return 0;
+  // A quarter of the terminal, clamped — the main column keeps the rest.
+  return Math.max(SIDEBAR_W, Math.min(SIDEBAR_MAX_W, Math.floor(columns / 4)));
+}
 
 export interface Layout {
   /** Total frame height handed to Ink — constant for a given terminal size. */

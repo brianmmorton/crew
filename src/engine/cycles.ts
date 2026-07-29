@@ -19,7 +19,8 @@ import {
 } from "./context.js";
 import { extractProposalsJson } from "../personas/parse.js";
 import { withHeartbeat } from "../util/heartbeat.js";
-import { writeRunLog } from "../util/runlog.js";
+import { basename } from "node:path";
+import { amendRun, recordRun, trimReason } from "../util/runlog.js";
 import { style } from "../util/color.js";
 import { agentsOfKind, executorFor } from "../agent/agents.js";
 import {
@@ -414,6 +415,7 @@ async function workClaimedItem(
       `${exec.name} ${item.identifier}: working (complexity=${item.complexity ?? "?"}, model=${model ?? "default"})…`,
     );
     const worktree = wt;
+    const startedAt = Date.now();
     const res = await withHeartbeat(logger, `${exec.name} ${item.identifier}`, () =>
       ports.persona.run(exec.name, {
         cwd: worktree,
@@ -423,7 +425,20 @@ async function workClaimedItem(
         onActivity: (line) => logger.info(`  ${item.identifier} ${line}`),
       }),
     );
-    const runLog = writeRunLog(cfg.configDir, `${exec.name}-${item.identifier}`, res.raw ?? res.summary ?? "");
+    const runLog = recordRun(
+      cfg.configDir,
+      `${exec.name}-${item.identifier}`,
+      res.raw ?? res.summary ?? "",
+      {
+        kind: "implement",
+        agent: exec.name,
+        item: item.identifier,
+        title: item.title,
+        outcome: res.usageLimited ? "usage-limited" : "ok",
+        ms: Date.now() - startedAt,
+        model: model ?? undefined,
+      },
+    );
     if (runLog) logger.info(`${exec.name} ${item.identifier}: full run output → ${runLog}`);
 
     if (res.usageLimited) {
@@ -481,6 +496,14 @@ async function workClaimedItem(
         `no-touch gate failed (${violations.length} protected path(s))`,
         `rejected — touched protected paths:\n${violations.join("\n")}`,
       );
+      recordRun(cfg.configDir, `notouch-${item.identifier}`, violations.join("\n"), {
+        kind: "verify",
+        agent: exec.name,
+        item: item.identifier,
+        title: item.title,
+        outcome: "rejected",
+        reason: trimReason(`touched protected paths: ${violations.join(", ")}`),
+      });
       return { status: "rejected", detail: violations.join(", ") };
     }
     logger.info(`${exec.name} ${item.identifier}: no-touch gate passed`);
@@ -493,10 +516,20 @@ async function workClaimedItem(
     const verify = await runVerify(cfg, wt, apps);
     // Verify output is the single most useful artifact when a cycle dies, so it
     // is always persisted — pass or fail — and its path is always logged.
-    const verifyLog = writeRunLog(
+    const verifyLog = recordRun(
       cfg.configDir,
       `verify-${item.identifier}${verify.ok ? "" : "-FAILED"}`,
       verify.output,
+      {
+        kind: "verify",
+        agent: exec.name,
+        item: item.identifier,
+        title: item.title,
+        outcome: verify.ok ? "ok" : "failed",
+        // The failing tail is the whole point of the history pane for a broken
+        // run — persist it so reading "why" doesn't mean opening the log.
+        reason: verify.ok ? undefined : trimReason(verify.output),
+      },
     );
     if (!verify.ok) {
       if (verifyLog) logger.warn(`${item.identifier}: full verify output → ${verifyLog}`);
@@ -551,6 +584,17 @@ async function workClaimedItem(
     return out;
   } catch (e) {
     logger.error(`${exec.name} cycle error on ${item.identifier}`, { error: String(e) });
+    // A cycle that dies here produced no run log of its own, so without this
+    // the failure is invisible in the history pane — the one place a user
+    // looks to find out why a sequence stopped.
+    recordRun(cfg.configDir, `error-${item.identifier}`, String(e), {
+      kind: "implement",
+      agent: exec.name,
+      item: item.identifier,
+      title: item.title,
+      outcome: "failed",
+      reason: trimReason(String(e)),
+    });
     // A verified commit exists but something after it blew up — keep the
     // worktree so the next cycle can retry landing it.
     const resumable = !!wt && (await ports.git.hasCommits(wt).catch(() => false));
@@ -626,6 +670,17 @@ async function landCommit(
   await ports.tracker.assign(item.id, ports.meta.myUserId);
   await ports.tracker.addComment(item.id, `crew: PR opened → ${url}`);
   logger.info(`${exec.name} opened PR for ${item.identifier}`, { url });
+
+  // Record the PR against the item itself, so it shows in history even when
+  // no reviewers are configured (the reviewer records carry it otherwise).
+  recordRun(cfg.configDir, `pr-${item.identifier}`, url, {
+    kind: "implement",
+    agent: exec.name,
+    item: item.identifier,
+    title: item.title,
+    outcome: "ok",
+    prUrl: url,
+  });
 
   // Reviewers run against the pushed branch, before the worktree is removed.
   logger.info(`${item.identifier}: review stage starting`);
@@ -740,6 +795,7 @@ async function runReviewers(
   for (const rev of reviewers) {
     try {
       logger.info(`${rev.name}: reviewing ${item.identifier}…`);
+      const revStartedAt = Date.now();
       const res = await withHeartbeat(logger, `${rev.name} ${item.identifier}`, () =>
         ports.persona.run(rev.name, {
           cwd: wt,
@@ -749,7 +805,16 @@ async function runReviewers(
           onActivity: (line) => logger.info(`  ${rev.name} ${line}`),
         }),
       );
-      const revLog = writeRunLog(cfg.configDir, `${rev.name}-${item.identifier}`, res.raw ?? "");
+      const revLog = recordRun(cfg.configDir, `${rev.name}-${item.identifier}`, res.raw ?? "", {
+        kind: "review",
+        agent: rev.name,
+        item: item.identifier,
+        title: item.title,
+        outcome: res.usageLimited ? "usage-limited" : "ok",
+        ms: Date.now() - revStartedAt,
+        model: rev.model ?? cfg.models.default,
+        prUrl,
+      });
       if (revLog) logger.info(`${rev.name} ${item.identifier}: full run output → ${revLog}`);
       if (res.usageLimited) {
         logger.warn(`${rev.name}: usage limited; skipping review`);
@@ -870,6 +935,7 @@ export async function proposerCycle(
 
   const prompt = buildProposerPrompt(cfg, def.prompt, ports.constitution, def);
   logger.info(`${name}: starting run (a headless agent analyzes the repo; this can take a minute)…`);
+  const startedAt = Date.now();
   const res = await withHeartbeat(logger, name, () =>
     ports.persona.run(name, {
       cwd: cfg.repo.path,
@@ -879,7 +945,13 @@ export async function proposerCycle(
       onActivity: (line) => logger.info(`  ${name} ${line}`),
     }),
   );
-  const runLog = writeRunLog(cfg.configDir, name, res.raw ?? "");
+  const runLog = recordRun(cfg.configDir, name, res.raw ?? "", {
+    kind: "propose",
+    agent: name,
+    outcome: res.usageLimited ? "usage-limited" : "ok",
+    ms: Date.now() - startedAt,
+    model: def.model ?? cfg.models.default,
+  });
   if (runLog) logger.info(`${name}: full run output → ${runLog}`);
   if (res.usageLimited) return { status: "usage-limited", resetAt: res.resetAt ?? null };
 
@@ -906,6 +978,10 @@ export async function proposerCycle(
     logger.info(`${name} filed ${item.identifier}${where}`, { title: p.title });
     if ((await ports.tracker.countBacklog()) >= cfg.triager.backlogCap) break;
   }
+
+  // The tickets are the proposer's whole output, but they don't exist until
+  // now — amend the index line written above rather than delaying it.
+  if (created.length && runLog) amendRun(cfg.configDir, basename(runLog), { created });
 
   return { status: "proposed", created };
 }

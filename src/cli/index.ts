@@ -8,7 +8,6 @@ import { loadConfig, crewDirName, crewRepoOverride } from "../config/load.js";
 import { inspectRepo } from "../git/discover.js";
 import { buildPorts } from "../engine/ports.js";
 import { implementerCycle, proposerCycle } from "../engine/cycles.js";
-import { runSupervised } from "../engine/supervisor.js";
 import { runSetup, launchInteractiveAgent } from "../setup/onboard.js";
 import { ensureGitignored } from "../util/gitignore.js";
 import { checkLabelGate, runDoctor } from "../util/doctor.js";
@@ -382,8 +381,10 @@ program
   });
 
 program
-  .command("tui")
-  .description("Live status screen: agents, log tail, and in-flight work")
+  .command("tui", { isDefault: true })
+  .description(
+    "Run the whole team on a live screen: executor loop + proposers on their cadence (default command)",
+  )
   .option(
     "-v, --verbose",
     "trace every render to <configDir>/logs/tui-debug.log (for diagnosing flicker)",
@@ -756,7 +757,7 @@ agentCmd
       console.log(`  1. Edit ${file} — describe what this agent should do.`);
       if (kind === "proposer") console.log(`  2. Try it:  crew once ${name}`);
       else if (kind === "executor")
-        console.log(`  2. Set \`claims:\` to the labels it should pick up, then: crew run`);
+        console.log(`  2. Set \`claims:\` to the labels it should pick up, then: crew`);
       else console.log(`  2. It runs automatically after the next PR is opened.`);
       console.log(`  3. See it listed:  crew agents`);
     },
@@ -898,24 +899,6 @@ mcpCmd
     for (const [name] of oauthServers) {
       console.log(`  ${hasStoredToken(name) ? "✓" : "✗"} ${name}${hasStoredToken(name) ? "" : "   → crew mcp login " + name}`);
     }
-  });
-
-program
-  .command("run")
-  .description("Run the whole team in one process: executor loop + proposers on their cadence")
-  .option("--no-proposers", "run only the executor loop (no scheduled proposers)")
-  .option("--kickoff", "also run each proposer once immediately at startup")
-  .action(async (opts: { proposers: boolean; kickoff?: boolean }) => {
-    const cfg = loadConfig();
-    const logPath = logFilePath(cfg.configDir);
-    logToFile(logPath);
-    console.error(`crew: logging to ${logPath}  (tail -f to follow)`);
-    await runDoctor(cfg, logger, true); // quiet: warn on missing prereqs, continue
-    const ports = await buildPorts(cfg);
-    await runSupervised(cfg, ports, logger, {
-      proposers: opts.proposers,
-      kickoff: !!opts.kickoff,
-    });
   });
 
 program.parseAsync(process.argv).catch((e) => {

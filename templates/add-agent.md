@@ -116,7 +116,7 @@ Read the file back to confirm it matches what was discussed. Tell the user:
 
 - `crew agents` — see it listed alongside everything else.
 - For a proposer: `crew once <name>` to try a single cycle right now.
-- For an executor: it needs `claims` set to pick up work; then `crew run`.
+- For an executor: it needs `claims` set to pick up work; then `crew`.
 - For a reviewer: it runs automatically the next time a PR opens.
 - If frontmatter or prompt needs a tweak later, they can just edit the file
   directly — no need to re-run this.

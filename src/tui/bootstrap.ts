@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import { Cron } from "croner";
 import type { CrewConfig } from "../types.js";
 import { agentsOfKind, scheduledAgents } from "../agent/agents.js";
@@ -6,12 +7,16 @@ import { requestStop, resetStop, runExecutorLoop, setPaused } from "../engine/lo
 import { poolStatus, worktreeRootFor } from "../git/pool.js";
 import { stuckItems } from "../engine/stuck.js";
 import { hasStoredToken } from "../config/oauth.js";
-import { readState } from "../util/state.js";
+import { readState, writeState } from "../util/state.js";
+import { readSessions } from "../util/runindex.js";
+import { pruneRunLogs, runIndexPath } from "../util/runlog.js";
 import { logFilePath, logToFile, logger } from "../util/logger.js";
 import { LogTail } from "./logTail.js";
 import { stopAllRuns } from "./runManager.js";
+import { startScheduler, stopScheduler } from "./scheduler.js";
 import { appStore, beginStep, endSteps, failBoot } from "./stores/app.js";
 import { setAgents, type AgentItem } from "./stores/agents.js";
+import { setSessions } from "./stores/history.js";
 import { appendEngineLines, setKnownAgents } from "./stores/feed.js";
 import { mcpStore, type McpStatus } from "./stores/mcp.js";
 import { poolStore, takeTrackerDirty, type SlotView, type StuckView } from "./stores/pool.js";
@@ -45,6 +50,8 @@ let ports: Ports | null = null;
 let cfgRef: CrewConfig | null = null;
 let countsAt = 0;
 let countsInFlight = false;
+/** Pid of a crew instance that was already running when we booted, if any. */
+let rivalPid: number | null = null;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -58,6 +65,16 @@ export async function startBackground(cfg: CrewConfig): Promise<void> {
   // Log lines keep flowing to the file while the TUI owns the screen; the
   // OUTPUT panel tails that same file back in.
   logToFile(logFilePath(cfg.configDir));
+
+  // The TUI is now the process that runs the team, so it owns the liveness
+  // record that `crew status` reads. Capture whoever held it BEFORE claiming
+  // it: a second crew against the same repo would double-claim work, and once
+  // we've written our own pid there's no way left to notice.
+  const bootState = readState(cfg.configDir);
+  rivalPid = bootState.pid && bootState.pid !== process.pid ? bootState.pid : null;
+  bootState.pid = process.pid;
+  bootState.startedAt = new Date().toISOString();
+  writeState(cfg.configDir, bootState);
 
   try {
     beginStep("reading the crew manifest");
@@ -86,6 +103,13 @@ export async function startBackground(cfg: CrewConfig): Promise<void> {
   // Seed the feed with recent history so the panel isn't empty at first paint.
   tail = new LogTail(logFilePath(cfg.configDir));
   appendEngineLines(tail.read());
+
+  // Once per session, not per run: each agent transcript is large, and an
+  // uncapped logs/runs directory is how this reaches a gigabyte. One readdir
+  // at boot is cheap; doing it on the poll path would not be.
+  const pruned = pruneRunLogs(cfg.configDir);
+  if (pruned > 0) logger.info(`pruned ${pruned} old run log(s)`);
+
   pollLocal();
 
   timer = setInterval(tick, POLL_MS);
@@ -103,6 +127,10 @@ export async function startBackground(cfg: CrewConfig): Promise<void> {
   void runExecutorLoop(cfg, ports, logger).catch((err) => {
     logger.error("executor loop crashed", { error: String(err) });
   });
+
+  // Started after the executor so the idle handler it installs is live before
+  // the first idle tick can fire.
+  startScheduler(cfg, ports);
 }
 
 export function stopBackground(): void {
@@ -110,12 +138,15 @@ export function stopBackground(): void {
   started = false;
   if (timer) clearInterval(timer);
   timer = null;
+  stopScheduler();
   requestStop();
   stopAllRuns();
   tail = null;
   ports = null;
   cfgRef = null;
   countsAt = 0;
+  rivalPid = null;
+  lastIndexStamp = "";
 }
 
 export function getPorts(): Ports | null {
@@ -145,9 +176,10 @@ function pollLocal(): void {
   try {
     setIfChanged(poolStore, "slots", readSlots(cfg));
     setIfChanged(poolStore, "stuck", readStuck(cfg));
-    setIfChanged(poolStore, "supervisorAlive", pidAlive(readState(cfg.configDir).pid));
+    setIfChanged(poolStore, "supervisorAlive", otherCrewAlive());
     publishMcp(cfg, ports);
     setAgentsIfChanged(buildAgentItems(ports));
+    refreshHistoryIfChanged(cfg);
   } catch (e) {
     // A bad poll tick must never take the screen down.
     trace("poll-error", () => String(e));
@@ -242,6 +274,18 @@ function publishMcp(cfg: CrewConfig, p: Ports): void {
 
 // ----------------------------- helpers -------------------------------------
 
+/**
+ * Is a DIFFERENT crew instance still running against this repo? Only ever the
+ * pid we found at boot — our own pid now owns state.json, so re-reading it
+ * would just find ourselves.
+ */
+function otherCrewAlive(): boolean {
+  if (rivalPid === null) return false;
+  if (pidAlive(rivalPid)) return true;
+  rivalPid = null; // it exited; stop paying for the check
+  return false;
+}
+
 /** Same liveness check the claim lock uses: signal 0. */
 function pidAlive(pid: number | undefined): boolean {
   if (!pid) return false;
@@ -261,6 +305,26 @@ function pidAlive(pid: number | undefined): boolean {
 function setIfChanged<T extends object, K extends keyof T>(store: T, key: K, next: T[K]): void {
   if (JSON.stringify(store[key]) === JSON.stringify(next)) return;
   store[key] = next;
+}
+
+/**
+ * Re-parse the run index only when the FILE changed. Runs finish every few
+ * minutes at best, so keying off (size, mtime) means the poll costs one stat()
+ * per second instead of parsing and re-grouping 256KB of JSONL — and the
+ * store keeps its identity, so the sidebar doesn't re-render either.
+ */
+let lastIndexStamp = "";
+function refreshHistoryIfChanged(cfg: CrewConfig): void {
+  let stamp = "";
+  try {
+    const st = statSync(runIndexPath(cfg.configDir));
+    stamp = `${st.size}:${st.mtimeMs}`;
+  } catch {
+    stamp = ""; // no index yet
+  }
+  if (stamp === lastIndexStamp) return;
+  lastIndexStamp = stamp;
+  setSessions(stamp ? readSessions(cfg.configDir) : []);
 }
 
 let lastAgentsShape = "";

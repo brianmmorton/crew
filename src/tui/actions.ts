@@ -8,9 +8,12 @@ import {
   toggleExpanded,
   type AgentItem,
 } from "./stores/agents.js";
+import { appStore, focusHistory, focusNext, toggleHistory } from "./stores/app.js";
+import { moveHistorySelection } from "./stores/history.js";
 import { poolStore } from "./stores/pool.js";
 import { runsStore } from "./stores/runs.js";
 import { startRun, stopRun, toggleRunPause } from "./runManager.js";
+import { setSchedulerPaused } from "./scheduler.js";
 
 /**
  * The intent layer between keys.ts and the stores/engine. Every user-visible
@@ -22,18 +25,39 @@ import { startRun, stopRun, toggleRunPause } from "./runManager.js";
 export function dispatch(action: Action, exit: () => void): void {
   switch (action.type) {
     case "up":
-      moveSelection(-1);
+      if (appStore.focus === "history") moveHistorySelection(-1);
+      else moveSelection(-1);
       return;
     case "down":
-      moveSelection(1);
+      if (appStore.focus === "history") moveHistorySelection(1);
+      else moveSelection(1);
       return;
     case "toggle-expand": {
+      // Enter is an agent-list gesture; in the history panel there is nothing
+      // to expand, because every row already shows its whole summary.
+      if (appStore.focus === "history") return;
       const agent = selectedAgent();
       if (agent) toggleExpanded(agent.name);
       return;
     }
     case "collapse-all":
+      if (appStore.focus === "history") {
+        appStore.focus = "agents";
+        return;
+      }
       agentsStore.expanded = {};
+      return;
+    case "toggle-history":
+      toggleHistory();
+      return;
+    case "focus-next":
+      focusNext();
+      return;
+    case "focus-right":
+      focusHistory();
+      return;
+    case "focus-left":
+      appStore.focus = "agents";
       return;
     case "run-selected": {
       const agent = selectedAgent();
@@ -123,15 +147,19 @@ function pauseAgent(agent: AgentItem): void {
  * Pause the worker pool: workers finish the cycle they're on but claim no
  * NEW work until resumed. Resume also wakes any worker sleeping out a poll
  * interval, so it picks work up immediately.
+ *
+ * Scheduled proposers pause with it — otherwise a pause would keep filing new
+ * work into a board nothing is draining.
  */
 export function togglePoolPause(): void {
   const next = !poolStore.executorPaused;
   poolStore.executorPaused = next;
   setPaused(next);
+  setSchedulerPaused(next);
   if (next) {
-    logger.info("worker pool paused — finishing in-flight cycles, claiming no new work");
+    logger.info("paused — finishing in-flight cycles, claiming no new work, proposers held");
   } else {
     wakeExecutor();
-    logger.info("worker pool resumed");
+    logger.info("resumed");
   }
 }

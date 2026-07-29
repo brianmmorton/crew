@@ -73,7 +73,7 @@ pnpm exec crew status            # pnpm (`pnpm crew status` also works)
 Inside `package.json` scripts, `crew` resolves on its own:
 
 ```json
-{ "scripts": { "crew": "crew run" } }
+{ "scripts": { "crew": "crew" } }
 ```
 
 You never need to type `./node_modules/.bin/crew`.
@@ -124,7 +124,7 @@ git add .crew && git commit -m "chore: add crew config"
 #                            (other CLIs use their own auth)
 
 crew status                      # confirm it connects; shows the schedule
-crew run                         # run the whole team (Ctrl-C to stop)
+crew                             # run the whole team on a live screen (q to quit)
 ```
 
 One-time on your board: add a workflow status named **Needs Approval** (in
@@ -259,13 +259,16 @@ crew applies on GitHub are simply skipped; and PRs are opened with
 | `crew agents` | List every agent, its kind, cadence, and options |
 | `crew agent new <name>` | Scaffold a new agent (`--kind proposer\|executor\|reviewer`) |
 | `crew once <agent>` | Run one cycle of any agent now |
-| `crew run` | Run the whole team in one process (executor loop + scheduled agents) |
+| `crew` | Run the whole team on a live screen (executor loop + scheduled agents) |
 
-While `crew run` is attached to a terminal it accepts single-key controls. Each
-scheduled agent gets a key (its first free letter — `q` QA, `d` Design, `a`
-Architect, and so on for your own), plus `i` nudges the executor, `k` kills the
-running agent, `p` pauses/resumes, `s` prints status, `Ctrl-C` quits. The exact
-legend is printed at startup.
+Running `crew` with no arguments starts the live screen: the agent roster with
+each one's next scheduled run, the in-flight work, and a tail of the log. It is
+also what *runs* the team — the executor loop and the proposers on their cron
+cadence both live in this process, so closing it stops the team.
+
+Controls: `↑↓` navigate, `⏎` expand an agent's output, `r` (or `1`-`9`) runs the
+selected agent now, `␣` pauses the selected agent's run, `p` pauses the whole
+pool, `x` stops a run, `q` quits. The legend is in the footer.
 
 ## Configuration
 

@@ -161,8 +161,7 @@ driving a sibling repo without `cd`-ing into it.
 | `crew status` | Backlog / WIP counts, schedule, in-flight work |
 | `crew agents` | List every agent, its kind, cadence, options |
 | `crew once <agent>` | Run one cycle of any agent right now |
-| `crew run` | Run the whole team: executor loop + scheduled proposers |
-| `crew tui` | Live status screen |
+| `crew` | Run the whole team on a live screen: executor loop + scheduled proposers |
 | `crew mcp login/logout/status <server>` | Manage OAuth for MCP servers |
 | `crew probe` | Prove `gates.setup`/`gates.verify` pass in a cold worktree |
 

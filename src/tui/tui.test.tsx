@@ -7,9 +7,37 @@ import assert from "node:assert/strict";
 import { render } from "ink-testing-library";
 import { stripAnsi } from "../util/color.js";
 import { keyToAction } from "./keys.js";
-import { computeLayout, fmtElapsed, fmtUntil, windowStart, MIN_FEED, PANE_MIN } from "./layout.js";
+import {
+  computeLayout,
+  fmtElapsed,
+  fmtUntil,
+  sidebarWidth,
+  windowStart,
+  MIN_FEED,
+  PANE_MIN,
+  SIDEBAR_MAX_W,
+  SIDEBAR_MIN_COLUMNS,
+  SIDEBAR_W,
+} from "./layout.js";
+import { toSessions } from "../util/runindex.js";
+import { dispatch } from "./actions.js";
+import {
+  historyStore,
+  moveHistorySelection,
+  resetHistoryStore,
+  setSessions,
+} from "./stores/history.js";
 import { agentColor } from "./palette.js";
-import { appStore, beginStep, endSteps, failBoot, resetAppStore } from "./stores/app.js";
+import {
+  appStore,
+  beginStep,
+  endSteps,
+  failBoot,
+  focusHistory,
+  focusNext,
+  resetAppStore,
+  toggleHistory,
+} from "./stores/app.js";
 import {
   agentsStore,
   moveSelection,
@@ -48,6 +76,7 @@ beforeEach(() => {
   resetFeedStore();
   resetPoolStore();
   resetMcpStore();
+  resetHistoryStore();
 });
 
 function seedAgents(names: string[], kinds?: string[]): void {
@@ -71,7 +100,6 @@ test("keys: navigation, expand, run, pause, stop, quit all map", () => {
   assert.deepEqual(keyToAction("", { downArrow: true }), { type: "down" });
   assert.deepEqual(keyToAction("j", {}), { type: "down" });
   assert.deepEqual(keyToAction("", { return: true }), { type: "toggle-expand" });
-  assert.deepEqual(keyToAction("", { rightArrow: true }), { type: "toggle-expand" });
   assert.deepEqual(keyToAction("", { escape: true }), { type: "collapse-all" });
   assert.deepEqual(keyToAction("r", {}), { type: "run-selected" });
   assert.deepEqual(keyToAction("3", {}), { type: "run-index", index: 2 });
@@ -356,4 +384,294 @@ test("render: dashboard fills exactly rows-2", () => {
   const h = frameHeight(lastFrame());
   unmount();
   assert.equal(h, 24);
+});
+
+// ----------------------------- history sidebar -----------------------------
+
+function seedSessions(): void {
+  setSessions(
+    toSessions([
+      {
+        id: "a.log",
+        kind: "implement",
+        at: "2026-07-28T10:00:00Z",
+        agent: "implementer",
+        item: "ENG-1",
+        title: "Fix cache",
+        outcome: "ok",
+        prUrl: "https://github.com/x/y/pull/412",
+        logPath: null,
+      },
+      {
+        id: "b.log",
+        kind: "verify",
+        at: "2026-07-28T11:00:00Z",
+        agent: "implementer",
+        item: "ENG-2",
+        title: "Add retries",
+        outcome: "failed",
+        reason: "2 failed, 41 passed",
+        logPath: null,
+      },
+    ]),
+  );
+}
+
+test("layout: sidebar appears only when wide enough, and grows within bounds", () => {
+  // Below the threshold a sidebar would truncate the agent rows' padEnd cells.
+  assert.equal(sidebarWidth(SIDEBAR_MIN_COLUMNS - 1, true), 0);
+  assert.equal(sidebarWidth(80, true), 0);
+  // Hidden is hidden, however wide the terminal is.
+  assert.equal(sidebarWidth(300, false), 0);
+
+  // At the threshold it takes the floor, and never less anywhere above it.
+  assert.equal(sidebarWidth(SIDEBAR_MIN_COLUMNS, true), SIDEBAR_W);
+  // It grows with the terminal — the content is text worth reading.
+  assert.ok(sidebarWidth(160, true) > SIDEBAR_W);
+  // …but stops, so a huge terminal doesn't starve the agent rows and feed.
+  assert.equal(sidebarWidth(400, true), SIDEBAR_MAX_W);
+
+  // The main column must stay wide enough for a full agent row at every size.
+  for (const cols of [120, 140, 160, 200, 300, 400]) {
+    assert.ok(cols - sidebarWidth(cols, true) >= 88, `main column too narrow at ${cols}`);
+  }
+});
+
+test("keys: arrows move focus between panels, enter still expands", () => {
+  assert.deepEqual(keyToAction("h", {}), { type: "toggle-history" });
+  assert.deepEqual(keyToAction("", { tab: true }), { type: "focus-next" });
+  assert.deepEqual(keyToAction("", { rightArrow: true }), { type: "focus-right" });
+  assert.deepEqual(keyToAction("", { leftArrow: true }), { type: "focus-left" });
+  assert.deepEqual(keyToAction("", { return: true }), { type: "toggle-expand" });
+});
+
+test("app store: sidebar starts visible and showing it never steals focus", () => {
+  assert.equal(appStore.historyVisible, true, "the panel is a standing readout");
+  assert.equal(appStore.focus, "agents", "focus starts on the agent list");
+
+  focusHistory();
+  assert.equal(appStore.focus, "history");
+
+  focusNext();
+  assert.equal(appStore.focus, "agents");
+
+  toggleHistory();
+  assert.equal(appStore.historyVisible, false);
+  assert.equal(appStore.focus, "agents", "hiding must not leave focus on an invisible list");
+
+  // Both focus gestures are inert while hidden — never focus something off-screen.
+  focusNext();
+  assert.equal(appStore.focus, "agents");
+  focusHistory();
+  assert.equal(appStore.focus, "agents");
+
+  toggleHistory();
+  assert.equal(appStore.historyVisible, true);
+  assert.equal(appStore.focus, "agents", "re-showing leaves the cursor where it was");
+});
+
+test("history store: selection clamps and survives a shrinking list", () => {
+  seedSessions();
+  assert.equal(historyStore.sessions.length, 2);
+
+  moveHistorySelection(-1);
+  assert.equal(historyStore.selected, 0, "clamps at the top");
+  moveHistorySelection(5);
+  assert.equal(historyStore.selected, 1, "clamps at the bottom");
+
+  // A poll that drops the list must pull the cursor back into range.
+  setSessions([]);
+  assert.equal(historyStore.selected, 0);
+});
+
+test("actions: → enters history, ↑↓ drive the focused list, ← comes back", () => {
+  seedAgents(["qa", "design", "implementer"]);
+  seedSessions();
+  const noop = () => {};
+
+  // Focused on agents: history must not move.
+  dispatch({ type: "down" }, noop);
+  assert.equal(agentsStore.selected, 1);
+  assert.equal(historyStore.selected, 0);
+
+  dispatch({ type: "focus-right" }, noop);
+  assert.equal(appStore.focus, "history");
+
+  dispatch({ type: "down" }, noop);
+  assert.equal(historyStore.selected, 1, "history cursor moved");
+  assert.equal(agentsStore.selected, 1, "agent cursor stayed put");
+
+  // Enter is an agent gesture — in history it must not expand anything.
+  dispatch({ type: "toggle-expand" }, noop);
+  assert.deepEqual(agentsStore.expanded, {});
+
+  dispatch({ type: "focus-left" }, noop);
+  assert.equal(appStore.focus, "agents");
+  dispatch({ type: "down" }, noop);
+  assert.equal(agentsStore.selected, 2, "arrows drive agents again");
+});
+
+test("render: sidebar shows what runs produced without changing frame height", () => {
+  appStore.rows = 30;
+  appStore.columns = 160;
+  seedAgents(["qa", "design"]);
+  seedSessions();
+
+  const with_ = render(<Dashboard />);
+  const hWith = frameHeight(with_.lastFrame());
+  const frame = clean(with_.lastFrame());
+  with_.unmount();
+
+  toggleHistory(); // hide it
+  const without = render(<Dashboard />);
+  const hWithout = frameHeight(without.lastFrame());
+  const hiddenFrame = clean(without.lastFrame());
+  without.unmount();
+
+  assert.equal(hWith, hWithout, "the sidebar is a width split — it must not add rows");
+  assert.match(frame, /RECENT/);
+  assert.match(frame, /ENG-1/);
+  assert.match(frame, /ENG-2/);
+  // The OUTCOMES are the point, not the fact that a run happened.
+  // A narrow sidebar truncates the url, so assert the marker + host rather
+  // than the full link — the point is that it's THERE without opening a log.
+  assert.match(frame, /⎇ https:\/\/github\.com/, "a created PR must be visible inline");
+  assert.match(frame, /2 failed/, "the verify failure must be visible inline");
+  assert.match(frame, /qa/, "agent rows still render alongside it");
+  assert.doesNotMatch(hiddenFrame, /RECENT/, "h hides the panel");
+});
+
+test("render: proposer sessions show the tickets they filed", () => {
+  appStore.rows = 30;
+  appStore.columns = 160;
+  seedAgents(["qa"]);
+  setSessions(
+    toSessions([
+      {
+        id: "p.log",
+        kind: "propose",
+        at: "2026-07-28T12:00:00Z",
+        agent: "qa",
+        outcome: "ok",
+        created: ["ENG-7", "ENG-8"],
+        logPath: null,
+      },
+    ]),
+  );
+
+  const { lastFrame, unmount } = render(<Dashboard />);
+  const frame = clean(lastFrame());
+  unmount();
+
+  assert.match(frame, /ENG-7/);
+  assert.match(frame, /ENG-8/);
+});
+
+test("render: long titles and urls truncate exactly once", () => {
+  appStore.rows = 30;
+  appStore.columns = 160;
+  seedAgents(["qa"]);
+  setSessions(
+    toSessions([
+      {
+        id: "1.log",
+        kind: "implement",
+        at: "2026-07-28T10:00:00Z",
+        agent: "implementer",
+        item: "ENG-1",
+        title: "A title far too long to fit inside the sidebar column",
+        outcome: "ok",
+        prUrl: "https://github.com/acme/very-long-repo-name/pull/41234",
+        logPath: null,
+      },
+    ]),
+  );
+
+  const { lastFrame, unmount } = render(<Dashboard />);
+  const frame = clean(lastFrame());
+  unmount();
+
+  const head = frame.split("\n").find((l) => l.includes("ENG-1"))!;
+  assert.ok(head, "expected the session header to render");
+  // Over-reserving row chrome makes Ink truncate a second time.
+  assert.doesNotMatch(head, /……/, "the header must truncate exactly once");
+  assert.match(head, /…/, "a too-long title must be truncated");
+
+  const pr = frame.split("\n").find((l) => l.includes("github.com"))!;
+  assert.ok(pr, "the PR url gets its own line");
+  assert.doesNotMatch(pr, /……/, "the url must truncate exactly once");
+});
+
+test("render: focus and sidebar changes never grow or duplicate the frame", () => {
+  // The incrementalRendering contract: the frame must never grow between
+  // paints, and no section header or footer may appear twice. A nested
+  // flexGrow row breaks this — its height follows its tallest child, so a
+  // taller sidebar re-anchors Ink's line diff and the chrome duplicates.
+  appStore.rows = 40;
+  appStore.columns = 200;
+  seedAgents(["architect", "design", "product", "qa", "implementer"]);
+  appendEngineLines(
+    Array.from({ length: 60 }, (_, i) => `2026-07-29T14:00:00Z INFO engine line ${i}`),
+  );
+  seedSessions();
+
+  const seen = new Set<number>();
+  const shot = (tag: string, frame?: string) => {
+    const rows = clean(frame).split("\n");
+    seen.add(rows.length);
+    assert.equal(rows.filter((l) => l.includes("AGENTS")).length, 1, `${tag}: one AGENTS header`);
+    assert.equal(rows.filter((l) => l.includes("RECENT")).length, 1, `${tag}: one RECENT header`);
+    assert.equal(rows.filter((l) => l.includes("q quit")).length, 1, `${tag}: one footer`);
+  };
+
+  const { lastFrame, rerender, unmount } = render(<Dashboard />);
+  shot("initial", lastFrame());
+
+  focusHistory();
+  rerender(<Dashboard />);
+  shot("focused history", lastFrame());
+
+  // A much taller sidebar than the agent list — the case that broke.
+  setSessions(
+    toSessions(
+      Array.from({ length: 30 }, (_, i) => ({
+        id: `${i}.log`,
+        kind: "implement" as const,
+        at: new Date(Date.parse("2026-07-29T10:00:00Z") - i * 60_000).toISOString(),
+        agent: "implementer",
+        item: `ENG-${i}`,
+        title: `Task ${i}`,
+        outcome: (i % 2 ? "failed" : "ok") as "failed" | "ok",
+        reason: i % 2 ? "2 failed, 41 passed" : undefined,
+        logPath: null,
+      })),
+    ),
+  );
+  rerender(<Dashboard />);
+  shot("sidebar grew", lastFrame());
+
+  moveHistorySelection(6);
+  rerender(<Dashboard />);
+  shot("scrolled history", lastFrame());
+
+  appStore.focus = "agents";
+  rerender(<Dashboard />);
+  shot("back to agents", lastFrame());
+  unmount();
+
+  assert.equal(seen.size, 1, `frame height must never change, saw ${[...seen].join(", ")}`);
+});
+
+test("render: sidebar stays hidden on a narrow terminal", () => {
+  appStore.rows = 30;
+  appStore.columns = 80;
+  seedAgents(["qa"]);
+  seedSessions();
+
+  const { lastFrame, unmount } = render(<Dashboard />);
+  const frame = clean(lastFrame());
+  unmount();
+
+  assert.doesNotMatch(frame, /RECENT/);
+  assert.match(frame, /qa/, "the agent list keeps its full width");
 });
