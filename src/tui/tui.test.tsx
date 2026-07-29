@@ -5,6 +5,7 @@ import React from "react";
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { render } from "ink-testing-library";
+import { stripAnsi } from "../util/color.js";
 import { keyToAction } from "./keys.js";
 import { computeLayout, fmtElapsed, fmtUntil, windowStart, MIN_FEED, PANE_MIN } from "./layout.js";
 import { agentColor } from "./palette.js";
@@ -219,7 +220,13 @@ test("app store: boot steps advance and failure marks the trailing step", () => 
 
 // ----------------------------- render smoke --------------------------------
 
-const frameHeight = (frame: string | undefined): number => (frame ?? "").split("\n").length;
+// Whether frames carry ANSI escapes depends on the environment (TTY,
+// FORCE_COLOR/NO_COLOR) — under `npm publish` colors are ON and a regex like
+// /backlog 12/ fails because "backlog " and "12" are separately styled
+// segments with escapes between them. Strip escapes before every assertion so
+// the tests pass identically in both modes.
+const clean = (frame: string | undefined): string => stripAnsi(frame ?? "");
+const frameHeight = (frame: string | undefined): number => clean(frame).split("\n").length;
 
 test("render: dashboard shows agents, statuses, mcp and legend", () => {
   appStore.rows = 30;
@@ -235,7 +242,7 @@ test("render: dashboard shows agents, statuses, mcp and legend", () => {
   beginRun("qa");
 
   const { lastFrame, unmount } = render(<Dashboard />);
-  const frame = lastFrame() ?? "";
+  const frame = clean(lastFrame());
   unmount();
 
   assert.match(frame, /crew/);
@@ -263,7 +270,7 @@ test("render: frame height never changes when the accordion opens", () => {
   toggleExpanded("qa");
   const expanded = render(<Dashboard />);
   const hExpanded = frameHeight(expanded.lastFrame());
-  const frame = expanded.lastFrame() ?? "";
+  const frame = clean(expanded.lastFrame());
   expanded.unmount();
 
   assert.equal(hExpanded, hCollapsed, "expanding a pane must not grow the frame");
@@ -277,7 +284,7 @@ test("render: expanded executor pane lists stuck work", () => {
   toggleExpanded("implementer");
 
   const { lastFrame, unmount } = render(<Dashboard />);
-  const frame = lastFrame() ?? "";
+  const frame = clean(lastFrame());
   unmount();
   assert.match(frame, /BRI-7/);
   assert.match(frame, /verify failed/);
@@ -290,7 +297,7 @@ test("render: feed interleaves engine and agent lines in arrival order", () => {
   appendAgentLines("qa", ["scanning routes"]);
 
   const { lastFrame, unmount } = render(<Dashboard />);
-  const frame = lastFrame() ?? "";
+  const frame = clean(lastFrame());
   unmount();
   const loopAt = frame.indexOf("loop started");
   const scanAt = frame.indexOf("scanning routes");
@@ -302,7 +309,7 @@ test("render: loading splash shows boat, steps, and stays frame-pinned", () => {
   beginStep("mustering agents & connecting tracker");
 
   const { lastFrame, unmount } = render(<Loading />);
-  const frame = lastFrame() ?? "";
+  const frame = clean(lastFrame());
   const h = frameHeight(lastFrame());
   unmount();
   assert.match(frame, /c {2}r {2}e {2}w/); // the boat hull
@@ -314,7 +321,7 @@ test("render: error screen shows the failure", () => {
   appStore.rows = 30;
   failBoot("Linear API key rejected");
   const { lastFrame, unmount } = render(<ErrorScreen />);
-  const frame = lastFrame() ?? "";
+  const frame = clean(lastFrame());
   unmount();
   assert.match(frame, /ran aground/);
   assert.match(frame, /Linear API key rejected/);
