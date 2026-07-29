@@ -6,16 +6,22 @@ import { historyStore } from "./stores/history.js";
 import { appStore } from "./stores/app.js";
 import { windowStart } from "./layout.js";
 import { agentColor } from "./palette.js";
+import { Panel, PANEL_CHROME, PANEL_CHROME_W } from "./Panel.js";
 
 /**
  * The history sidebar: what recent runs PRODUCED, newest first — a PR link,
  * the tickets filed, or the error that stopped the run. Deliberately not a log
  * viewer: the full transcript still lives at the path in the run index, and
- * the panel's job is to answer "what happened" without opening anything.
+ * the panel's job is to answer "what happened" without opening anything —
+ * and ⏎ hands the selected session's PR (or transcript) to the OS to open.
+ *
+ * Focusing the panel widens it (see layout.ts sidebarWidth), so links that
+ * truncate at a glance become readable — and cmd+clickable — the moment you
+ * arrow into them.
  *
  * Subscription shape mirrors AgentsPanel: rows take primitive props only, so
  * moving the cursor re-renders exactly the two rows that changed, and the
- * title line subscribes to focus by itself so Tab repaints one line.
+ * panel chrome subscribes to focus by itself.
  */
 
 const OUTCOME = {
@@ -48,27 +54,20 @@ export const HistorySidebar = memo(function HistorySidebar({
   width: number;
   height: number;
 }): React.ReactNode {
-  return (
-    <Box flexDirection="column" width={width} flexShrink={0} flexGrow={0}>
-      <SidebarTitle width={width} />
-      <SessionList width={width} height={Math.max(0, height - 1)} />
-    </Box>
-  );
-});
-
-const SidebarTitle = memo(function SidebarTitle({ width }: { width: number }): React.ReactNode {
   const focused = useSnapshot(appStore).focus === "history";
-  const hint = focused ? "← back" : "→ open";
-  const label = " RECENT";
-  const gap = Math.max(1, width - label.length - hint.length - 1);
   return (
-    <Text wrap="truncate-end">
-      <Text bold color={focused ? "blueBright" : "gray"}>
-        {label}
-      </Text>
-      <Text dimColor>{" ".repeat(gap)}</Text>
-      <Text dimColor>{hint}</Text>
-    </Text>
+    <Panel
+      title="HISTORY"
+      hint={focused ? "⏎ open · ← back" : "→ focus"}
+      width={width}
+      height={height}
+      focused={focused}
+    >
+      <SessionList
+        width={width - PANEL_CHROME_W}
+        height={Math.max(0, height - PANEL_CHROME)}
+      />
+    </Panel>
   );
 });
 
@@ -221,7 +220,16 @@ const HighlightRow = memo(function HighlightRow({
     <Text wrap="truncate-end">
       <Text dimColor>{"     "}</Text>
       <Text color={HIGHLIGHT_COLOR[kind]}>{HIGHLIGHT_MARK[kind]}</Text>
-      <Text dimColor>{` ${ellipsize(text, w)}`}</Text>
+      <Text> </Text>
+      {kind === "pr" ? (
+        // Links are the panel's payload: full-bright and underlined so they
+        // read as openable — ⏎ opens them, or cmd+click when untruncated.
+        <Text color="cyanBright" underline>
+          {ellipsize(text, w)}
+        </Text>
+      ) : (
+        <Text dimColor>{ellipsize(text, w)}</Text>
+      )}
     </Text>
   );
 });

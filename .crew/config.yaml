@@ -1,0 +1,340 @@
+# crew — per-project config (<repo>/.crew/config.yaml). Versioned; edit per project.
+# Tip: run `crew setup` to have an agent analyze your repo and fill most of this in.
+
+project: "crew"                # this repo IS crew — the agent team works on its own source
+
+repo:
+  # Left at ".", crew uses the git toplevel containing this .crew/ directory, so
+  # commands work from any subdirectory. Set an explicit path to point at
+  # another checkout; it must be that repo's root.
+  path: "."
+  # Detected from origin/HEAD at setup. Edit if you target another branch.
+  baseBranch: main
+
+  # Where pull requests are opened. Detected from your origin remote at setup:
+  #   github     — uses the `gh` CLI, which carries its own auth (gh auth login)
+  #   bitbucket  — uses the Bitbucket Cloud REST API; needs either
+  #                BITBUCKET_ACCESS_TOKEN, or BITBUCKET_USERNAME +
+  #                BITBUCKET_APP_PASSWORD (see .env.example)
+  forge: "github"
+
+  # Bitbucket only: "workspace/repo-slug". Omit to infer it from the origin
+  # remote. Ignored when forge is "github".
+  # bitbucketRepo: "my-workspace/my-repo"
+
+# Which coding-agent CLI crew drives. "claude" is built-in (live streaming +
+# subscription auth). For any other CLI (Codex, Cursor, Grok, a local script),
+# set provider to anything else and configure the command:
+#   agent:
+#     provider: "codex"
+#     command: "codex"            # the CLI binary on your PATH
+#     args: ["exec"]              # base args before the prompt
+#     promptVia: "stdin"          # "stdin" (piped) or "arg" (appended)
+#     modelFlag: "--model"        # how to pass the model (omit if the CLI has none)
+#     mcpConfigFlag: "--mcp-config"      # how it takes an MCP config file
+#     mcpStrictFlag: "--strict-mcp-config"  # confine it to that file (if supported)
+agent:
+  provider: "claude"
+
+# --- External tools (MCP) ----------------------------------------------------
+# Servers your agents can be granted, to give them context they can't get from
+# the repo alone: production errors, analytics, a docs index. Grant them per
+# persona below with `mcp: [name]` — an agent with no `mcp:` key gets NO tools,
+# and never inherits the servers you've configured in Claude Code or Codex
+# yourself. That keeps a run reproducible on anyone else's machine.
+#
+# SECRETS: this file is committed, so never paste a key here. Write ${VAR} and
+# put the value in .env or ~/.crew/env (see .env.example). crew resolves it at
+# spawn time into a temporary file outside the repo and deletes it after the run.
+# A missing variable skips the run with a message naming it, rather than letting
+# the agent burn a cycle failing to authenticate.
+#
+# Grant READ-ONLY servers, with READ-ONLY tokens. crew's whole model is that
+# agents *propose* and the engine files — a server that can create issues
+# bypasses dedup, allowedTypes, maxProposals, and the PRD approval gate.
+# `crew doctor` warns if you grant one, but the token scope is what stops it:
+# headless runs skip the permission system, so `allowedTools` below is advisory
+# (crew puts it in the prompt), NOT an enforced boundary.
+mcpServers: {}
+  # sentry:
+  #   command: "npx"
+  #   args: ["-y", "@sentry/mcp-server@latest"]
+  #   env:
+  #     SENTRY_AUTH_TOKEN: "${SENTRY_AUTH_TOKEN}"
+  #   # Advisory: tells the agent which tools to use. Bare names are namespaced
+  #   # to mcp__sentry__<tool>. Omit to leave every tool available.
+  #   allowedTools: ["find_errors", "get_issue_details"]
+  #   description: "Production errors, so QA files what's actually breaking"
+  #
+  # An HTTP server instead of a local process:
+  # analytics:
+  #   url: "https://mcp.example.com/sse"
+  #   type: "sse"
+  #   headers:
+  #     Authorization: "Bearer ${ANALYTICS_TOKEN}"
+  #
+  # A server that requires OAuth instead of a static token. crew's runs are
+  # headless, so the browser step happens once ahead of time — run
+  # `crew mcp login <name>` — and crew refreshes the access token itself
+  # before every run after that. See `crew mcp status` / `crew mcp logout`.
+  # linear:
+  #   url: "https://mcp.linear.app/mcp"
+  #   type: "http"
+  #   oauth:
+  #     authorizationUrl: "https://mcp.linear.app/authorize"
+  #     tokenUrl: "https://mcp.linear.app/token"
+  #     clientId: "${LINEAR_MCP_CLIENT_ID}"
+  #     # clientSecret: "${LINEAR_MCP_CLIENT_SECRET}"  # confidential clients only
+  #     scopes: "read"
+  #     # redirectUri: "http://127.0.0.1:PORT/callback"  # only if the provider
+  #     # requires a pre-registered exact redirect URI (port included). Omit to
+  #     # let `crew mcp login` pick an ephemeral port.
+
+# --- Issue tracker -----------------------------------------------------------
+# Where crew files work and reads it back. `provider` picks the adapter:
+#   linear  — needs LINEAR_API_KEY
+#   jira    — needs JIRA_HOST, JIRA_EMAIL, JIRA_API_TOKEN (Jira Cloud)
+# Put the credentials in .env (see .env.example).
+#
+# NOTE: this block used to be called `linear:`. That spelling still works and is
+# read as provider: linear — no need to change an existing config.
+tracker:
+  provider: "linear"
+
+  # Linear: the exact team name. Jira: the project KEY, e.g. "BRI".
+  team: "YOUR LINEAR TEAM"
+
+  # Optional scoping below the team, so several repos can share one team/project
+  # and stay independent. Linear: a project name or id. Jira: a component name.
+  # project: "My Repo"
+
+  # Type labels crew applies to everything it files. On Jira these are plain
+  # labels (no spaces allowed) and are created implicitly on first use.
+  labels:
+    prd: "type:prd"
+    bug: "type:bug"
+    task: "type:task"
+    chore: "type:chore-dx"
+    # Applied when a cycle fails in a way the next cycle can resume from — the
+    # item goes back to "ready" carrying this, and the executor picks up the
+    # preserved worktree instead of starting over. Not meant to be set by hand.
+    stuck: "crew:stuck"
+    # Applied when an item needs a person (e.g. repeated verify failure).
+    # Recovery never auto-resumes an item carrying this — it's also listed in
+    # executable.excludeLabels by default so the executor stops claiming it,
+    # not just annotates it. Clear it yourself once you've unblocked the item.
+    needsHuman: "crew:needs-human"
+
+  # Workflow state names, exactly as they appear on your board. On Jira these
+  # must match real statuses in the project's workflow — crew checks at startup
+  # and tells you what's available if one is wrong.
+  statuses:
+    backlog: "Backlog"
+    ready: "Todo"
+    inProgress: "In Progress"
+    review: "In Review"
+    needsApproval: "Needs Approval"   # add this status to your workflow
+    done: "Done"
+  approvedStates: ["Todo", "In Progress", "In Review", "Done"]
+
+  # Narrow what the executor may claim out of the ready state. Both lists are
+  # empty by default, which means every ready item is fair game. This gates
+  # *selection*, unlike a persona's `claims`, which only routes an already-
+  # selected item to a particular executor.
+  executable:
+    # Non-empty = an item must carry at least one of these labels to be worked.
+    # Use this to keep crew to an opt-in slice of a shared board.
+    requireLabels: []
+    # Items carrying any of these are never claimed, even if they also satisfy
+    # requireLabels. Unlabeled items are unaffected.
+    excludeLabels: []
+
+  # Non-material proposals (bug/task/chore-dx below your PRD threshold) go
+  # straight to the ready state, so the executor picks them up immediately.
+  # Set false to stage everything in Backlog for manual promotion instead —
+  # useful if you want a human gate on every item, not just PRDs.
+  autoPromote: true
+
+  # Jira-only. Ignored when provider is "linear".
+  jira:
+    # Jira requires a real issue type on every create (unlike Linear, where the
+    # type is only a label). Map crew's types onto types your project has.
+    issueTypes:
+      prd: "Task"
+      bug: "Bug"
+      task: "Task"
+      chore: "Task"
+    # Issue type for children created when a PRD is decomposed. Omit to reuse
+    # the mapping above. Set to "Subtask" if your project prefers real subtasks.
+    # subtaskIssueType: "Subtask"
+    # Set false if the priority field is disabled on your instance.
+    usePriority: true
+    priorities:
+      critical: "Highest"
+      high: "High"
+      medium: "Medium"
+      low: "Low"
+
+budget:
+  target: max-monthly
+  implementerWorkers: 1
+  backoffMinutes: 30
+  pollSeconds: 60
+
+# --- Worktrees ---------------------------------------------------------------
+# Every cycle runs in an isolated git worktree. By default each one is created
+# fresh and thrown away, so an agent always verifies against a genuinely cold
+# tree — the same thing `crew probe` proves.
+#
+# On a very large repo that costs real time per cycle: a full checkout, then
+# gates.setup reinstalling dependencies into an empty tree. Set reuse: true to
+# keep a fixed pool of worktrees and reset them between cycles instead, which
+# preserves node_modules and build caches.
+#
+# THE TRADE: a reused worktree carries residue from the last cycle, so a verify
+# pass means "passes given what the previous agent left behind" rather than
+# "passes cold". Cold-tree breakage then surfaces in CI instead of here. That's
+# usually worth it on a monorepo where a cold cycle costs minutes; it is not
+# worth it on a repo that checks out in seconds.
+worktrees:
+  reuse: false
+  # Pool size. Defaults to budget.implementerWorkers. Each slot is a full
+  # checkout, so this is also your disk budget.
+  # max: 2
+  # Untracked paths a reset keeps. Files your .gitignore already covers are
+  # preserved anyway; this list is for artifacts that are untracked but NOT
+  # ignored. Listing a build *output* here (rather than a cache) lets one
+  # agent's artifacts satisfy the next agent's verify — that's the one way this
+  # setting can produce a wrong result rather than a slow one.
+  # preserveArtifacts: ["node_modules", ".next", ".turbo", ".gradle", "target", "dist", "build"]
+  # Force a full clean every N reuses, so residue can't accumulate forever.
+  # 0 disables it — only sensible if a deep clean is genuinely too expensive.
+  # recycleAfter: 20
+
+gates:
+  wipCap: 3
+  # Optional: prepare the env before verify (activate a runtime, install deps).
+  # Runs in the same shell as the verify commands. Leave empty if not needed.
+  # e.g. node:  "bash -lc 'nvm use >/dev/null' && pnpm install"
+  #      python:"source .venv/bin/activate && pip install -r requirements.txt"
+  # Cold worktrees have no node_modules; tsx and typescript are dev deps needed
+  # by both verify commands. Node is a system install (/usr/local/bin), so no
+  # version manager needs activating. `npm ci` = exact lockfile, no lock churn.
+  setup: "npm ci"
+  verify:
+    typecheck: "npm run typecheck"   # tsc --noEmit (no build step needed; runs from src/)
+    test: "npm test"                 # node --test over src/**/*.test.ts(x) via tsx
+  noTouch:                     # globs the Implementer must never modify
+    - ".env*"
+    - "**/.env*"
+
+# --- Models -----------------------------------------------------------------
+# Each work item has a complexity (the complexity:low/medium/high label agents
+# set, or you set by hand). The implementer runs on the model mapped here, so
+# simple work uses a cheap model and hard work uses your strongest.
+#
+# Prefer SHORT ALIASES — they auto-track the latest version, so there are no
+# model IDs to maintain:
+#   haiku    – fastest & cheapest; small, low-risk changes
+#   sonnet   – balanced; a solid everyday-coding default
+#   opus     – strongest reasoning; complex / multi-file / risky changes
+#   best     – highest-capability model available on your plan
+#   opusplan – Opus while planning, Sonnet while editing (quality/cost mix)
+# Empty "" = Claude Code's default model. To pin an exact version use a full id
+# (e.g. claude-opus-5). To see what your plan offers: run `claude`, then `/model`.
+models:
+  default: ""
+  byComplexity:
+    low: "haiku"      # fast / cheap
+    medium: "sonnet"  # balanced
+    high: "opus"      # strongest
+
+# --- Agents ------------------------------------------------------------------
+# Every `personas/<name>.md` file is an agent. Add your own with
+# `crew agent new <name>` (or just drop in a file) and list it with
+# `crew agents`. Settings can live here OR as YAML frontmatter in the persona
+# file itself; this block wins where both set the same field.
+#
+# Each agent has a `kind`:
+#   proposer  read-only; analyzes the repo on a cadence and files work items
+#   executor  claims a work item, implements it in a worktree, opens a PR
+#   reviewer  runs after a PR opens; comments and (if allowed) moves the issue
+#
+# The built-ins default to the right kind, so they need only a cadence.
+# Options every agent may set: model, description, mcp (see mcpServers above).
+# Proposers/reviewers also: allowedTypes, maxProposals, label.
+# Executors also: claims. Reviewers also: canTransitionTo.
+# Cadences and per-agent settings live as frontmatter in personas/<name>.md;
+# this block just enables the roster (and would win on any overlapping field).
+personas:
+  implementer: {}              # executor, continuous
+  qa:          {}              # proposer, every 6h — defects & coverage gaps
+  architect:   {}              # proposer, Tue+Fri — structural health
+  design:      {}              # proposer, Mon — TUI/UX audit (Ink terminal UI)
+
+  # Examples of custom agents (create the .md file first):
+  #
+  # A proposer restricted to filing at most 3 bugs, tagged for filtering:
+  # a11y:
+  #   kind: proposer
+  #   cadence: "0 8 * * 1"
+  #   allowedTypes: [bug]
+  #   maxProposals: 3
+  #   label: "agent:a11y"
+  #
+  # An executor that handles doc work instead of the implementer. Items whose
+  # labels match `claims` route here; everything else still goes to implementer.
+  # docs-writer:
+  #   kind: executor
+  #   claims: ["type:docs"]
+  #   model: haiku
+  #
+  # A reviewer that inspects every PR. It may comment freely, but can only move
+  # the issue to states you list here — anything else is refused by the engine.
+  # security:
+  #   kind: reviewer
+  #   model: opus
+  #   canTransitionTo: ["Todo"]
+  #
+  # Granting external tools: this QA agent can read production errors, so it
+  # files the bugs that are actually firing instead of the ones it imagines.
+  # Names must match keys under `mcpServers:` above.
+  # qa:
+  #   cadence: "0 */6 * * *"
+  #   mcp: [sentry]
+
+triager:
+  cadence: "0 * * * *"
+  dedupThreshold: 0.85
+  backlogCap: 30
+  # How many days a completed item keeps blocking a near-identical proposal, so
+  # agents don't re-file work that just shipped. Canceled items block forever —
+  # canceling is how you say "don't do this", and that shouldn't expire.
+  dedupLookbackDays: 30
+
+# When the executor runs out of work, pull a proposer in early instead of
+# leaving the team idle until its next cron tick. One agent at a time,
+# least-recently-run first.
+idle:
+  enabled: true
+  # How long the queue must stay empty before triggering.
+  afterMinutes: 10
+  # Floor on how often any one proposer runs — applies to cron runs too, so the
+  # two paths can't double up on each other.
+  minIntervalMinutes: 30
+  # Skip idle triggers while the backlog is deeper than this. A backlog means
+  # work is waiting on you to promote it, not that the team is out of ideas.
+  maxBacklog: 0
+  # Stop triggering after this many idle runs file nothing. Resumes on its own
+  # once the board changes. This is the backstop against a runaway idle loop.
+  maxEmptyRuns: 3
+  # Which proposers idle may run. Empty = all of them.
+  agents: []
+
+# Customize the `crew` TUI. All optional.
+# ui:
+#   # Rendered as ASCII art in the TUI header and startup splash, in place of
+#   # the default "crew" wordmark. Any image URL jimp can decode (png/jpg/gif/
+#   # bmp/tiff). Refetched on every TUI launch; silently falls back to the
+#   # wordmark if the URL is unreachable or undecodable.
+#   logoUrl: "https://example.com/logo.png"

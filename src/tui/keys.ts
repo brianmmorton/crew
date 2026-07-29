@@ -61,7 +61,7 @@ export function keyToAction(input: string, key: Partial<Key>): Action | null {
  * legend that claims otherwise is worse than none.
  */
 export const LEGEND =
-  "↑↓ navigate · ⏎ expand · → recent · r run · 1-9 run № · ␣ pause · p pool · x stop · q quit";
+  "↑↓ navigate · ⏎ expand · → history · r run · 1-9 run № · ␣ pause · p pool · x stop · q quit";
 
 export const HISTORY_LEGEND =
-  "↑↓ navigate · ← back to agents · h hide · q quit";
+  "↑↓ navigate · ⏎ open link · ← back to agents · h hide · q quit";

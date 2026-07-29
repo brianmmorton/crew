@@ -15,10 +15,14 @@ import {
   windowStart,
   MIN_FEED,
   PANE_MIN,
+  SIDEBAR_FOCUS_MAX_W,
   SIDEBAR_MAX_W,
   SIDEBAR_MIN_COLUMNS,
   SIDEBAR_W,
 } from "./layout.js";
+import { topBorderParts } from "./Panel.js";
+import { rowCells } from "./AgentsPanel.js";
+import { setOpener } from "./openLink.js";
 import { toSessions } from "../util/runindex.js";
 import { dispatch } from "./actions.js";
 import {
@@ -128,8 +132,8 @@ test("layout: expanding panes takes rows from the feed, total stays balanced", (
   const agentCount = 5;
   for (const expanded of [0, 1, 2]) {
     const l = computeLayout(rows, agentCount, expanded);
-    // header(2) + titles(2) + footer(1) + list + panes + feed === frame
-    const used = 5 + l.listRows + expanded * l.paneH + l.feedH;
+    // header(2) + footer(1) + 2 panel borders(2 each) + list + panes + feed === frame
+    const used = 7 + l.listRows + expanded * l.paneH + l.feedH;
     assert.equal(used, l.frameH, `unbalanced at expanded=${expanded}`);
     assert.ok(l.feedH >= 1);
   }
@@ -418,7 +422,8 @@ function seedSessions(): void {
 }
 
 test("layout: sidebar appears only when wide enough, and grows within bounds", () => {
-  // Below the threshold a sidebar would truncate the agent rows' padEnd cells.
+  // Below the threshold a sidebar would crush the agent rows past what their
+  // responsive cells can shed.
   assert.equal(sidebarWidth(SIDEBAR_MIN_COLUMNS - 1, true), 0);
   assert.equal(sidebarWidth(80, true), 0);
   // Hidden is hidden, however wide the terminal is.
@@ -431,10 +436,52 @@ test("layout: sidebar appears only when wide enough, and grows within bounds", (
   // …but stops, so a huge terminal doesn't starve the agent rows and feed.
   assert.equal(sidebarWidth(400, true), SIDEBAR_MAX_W);
 
-  // The main column must stay wide enough for a full agent row at every size.
-  for (const cols of [120, 140, 160, 200, 300, 400]) {
-    assert.ok(cols - sidebarWidth(cols, true) >= 88, `main column too narrow at ${cols}`);
+  // The main column keeps at least the width the responsive agent rows need
+  // (rowCells' smallest plan) at every size, focused or not.
+  for (const cols of [100, 120, 140, 160, 200, 300, 400]) {
+    assert.ok(cols - sidebarWidth(cols, true) >= 50, `main column too narrow at ${cols}`);
+    assert.ok(
+      cols - sidebarWidth(cols, true, true) >= 50,
+      `main column too narrow at ${cols} focused`,
+    );
   }
+});
+
+test("layout: focusing the sidebar widens it, up to its own cap", () => {
+  for (const cols of [120, 160, 200, 300]) {
+    assert.ok(
+      sidebarWidth(cols, true, true) > sidebarWidth(cols, true, false),
+      `focus must widen the sidebar at ${cols} columns`,
+    );
+  }
+  // Wide enough terminals let a focused panel show a full GitHub PR url.
+  assert.equal(sidebarWidth(400, true, true), SIDEBAR_FOCUS_MAX_W);
+  assert.ok(sidebarWidth(170, true, true) >= 72, "a PR url must fit when focused at 170 cols");
+});
+
+test("panel: top border is exactly the panel width and sheds the hint first", () => {
+  for (const width of [20, 30, 47, 76, 120]) {
+    for (const hint of [undefined, "⏎ open · ← back", "a very long hint that will not fit"]) {
+      const p = topBorderParts(width, "HISTORY", hint);
+      const line = p.left + p.title + p.fill + p.hint + p.right;
+      assert.equal(line.length, width, `width=${width} hint=${hint}`);
+    }
+  }
+  // Tight panels drop the hint before ever touching the title.
+  const tight = topBorderParts(16, "AGENTS", "↑↓ navigate");
+  assert.equal(tight.hint, "");
+  assert.equal(tight.title, "AGENTS");
+});
+
+test("agents: rows shed kind and schedule cells as the panel narrows", () => {
+  const wide = rowCells(100);
+  assert.ok(wide.kindW > 0 && wide.schedW > 0);
+  const mid = rowCells(70);
+  assert.equal(mid.kindW, 0, "kind goes first");
+  assert.ok(mid.schedW > 0);
+  const narrow = rowCells(48);
+  assert.equal(narrow.schedW, 0, "schedule goes next");
+  assert.ok(narrow.nameW > 0, "the name always survives");
 });
 
 test("keys: arrows move focus between panels, enter still expands", () => {
@@ -488,6 +535,8 @@ test("actions: → enters history, ↑↓ drive the focused list, ← comes back
   seedAgents(["qa", "design", "implementer"]);
   seedSessions();
   const noop = () => {};
+  const opened: string[] = [];
+  setOpener((target) => opened.push(target));
 
   // Focused on agents: history must not move.
   dispatch({ type: "down" }, noop);
@@ -501,14 +550,27 @@ test("actions: → enters history, ↑↓ drive the focused list, ← comes back
   assert.equal(historyStore.selected, 1, "history cursor moved");
   assert.equal(agentsStore.selected, 1, "agent cursor stayed put");
 
-  // Enter is an agent gesture — in history it must not expand anything.
+  // Enter in history opens what the session produced — never the accordion.
   dispatch({ type: "toggle-expand" }, noop);
   assert.deepEqual(agentsStore.expanded, {});
+  assert.deepEqual(opened, ["https://github.com/x/y/pull/412"], "⏎ opens the session's PR");
 
   dispatch({ type: "focus-left" }, noop);
   assert.equal(appStore.focus, "agents");
   dispatch({ type: "down" }, noop);
   assert.equal(agentsStore.selected, 2, "arrows drive agents again");
+});
+
+test("actions: ⏎ on a session with no PR or transcript opens nothing", () => {
+  seedAgents(["qa"]);
+  seedSessions();
+  const opened: string[] = [];
+  setOpener((target) => opened.push(target));
+  appStore.focus = "history";
+  // Newest-first: index 0 is the failed verify session, which has no PR and a
+  // null logPath — the keypress must narrate, not crash or open garbage.
+  dispatch({ type: "toggle-expand" }, () => {});
+  assert.deepEqual(opened, []);
 });
 
 test("render: sidebar shows what runs produced without changing frame height", () => {
@@ -529,7 +591,7 @@ test("render: sidebar shows what runs produced without changing frame height", (
   without.unmount();
 
   assert.equal(hWith, hWithout, "the sidebar is a width split — it must not add rows");
-  assert.match(frame, /RECENT/);
+  assert.match(frame, /HISTORY/);
   assert.match(frame, /ENG-1/);
   assert.match(frame, /ENG-2/);
   // The OUTCOMES are the point, not the fact that a run happened.
@@ -538,7 +600,7 @@ test("render: sidebar shows what runs produced without changing frame height", (
   assert.match(frame, /⎇ https:\/\/github\.com/, "a created PR must be visible inline");
   assert.match(frame, /2 failed/, "the verify failure must be visible inline");
   assert.match(frame, /qa/, "agent rows still render alongside it");
-  assert.doesNotMatch(hiddenFrame, /RECENT/, "h hides the panel");
+  assert.doesNotMatch(hiddenFrame, /HISTORY/, "h hides the panel");
 });
 
 test("render: proposer sessions show the tickets they filed", () => {
@@ -620,7 +682,7 @@ test("render: focus and sidebar changes never grow or duplicate the frame", () =
     const rows = clean(frame).split("\n");
     seen.add(rows.length);
     assert.equal(rows.filter((l) => l.includes("AGENTS")).length, 1, `${tag}: one AGENTS header`);
-    assert.equal(rows.filter((l) => l.includes("RECENT")).length, 1, `${tag}: one RECENT header`);
+    assert.equal(rows.filter((l) => l.includes("HISTORY")).length, 1, `${tag}: one HISTORY header`);
     assert.equal(rows.filter((l) => l.includes("q quit")).length, 1, `${tag}: one footer`);
   };
 
@@ -672,6 +734,6 @@ test("render: sidebar stays hidden on a narrow terminal", () => {
   const frame = clean(lastFrame());
   unmount();
 
-  assert.doesNotMatch(frame, /RECENT/);
+  assert.doesNotMatch(frame, /HISTORY/);
   assert.match(frame, /qa/, "the agent list keeps its full width");
 });

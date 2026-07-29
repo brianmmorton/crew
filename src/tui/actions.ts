@@ -9,7 +9,8 @@ import {
   type AgentItem,
 } from "./stores/agents.js";
 import { appStore, focusHistory, focusNext, toggleHistory } from "./stores/app.js";
-import { moveHistorySelection } from "./stores/history.js";
+import { moveHistorySelection, selectedSession } from "./stores/history.js";
+import { openExternal } from "./openLink.js";
 import { poolStore } from "./stores/pool.js";
 import { runsStore } from "./stores/runs.js";
 import { startRun, stopRun, toggleRunPause } from "./runManager.js";
@@ -33,9 +34,14 @@ export function dispatch(action: Action, exit: () => void): void {
       else moveSelection(1);
       return;
     case "toggle-expand": {
-      // Enter is an agent-list gesture; in the history panel there is nothing
-      // to expand, because every row already shows its whole summary.
-      if (appStore.focus === "history") return;
+      // Enter follows focus: in the agent list it expands the accordion; in
+      // the history panel every row already shows its whole summary, so Enter
+      // means "open what this session produced" — the PR in a browser, or the
+      // transcript when there is no PR.
+      if (appStore.focus === "history") {
+        openSelectedSession();
+        return;
+      }
       const agent = selectedAgent();
       if (agent) toggleExpanded(agent.name);
       return;
@@ -93,6 +99,25 @@ export function dispatch(action: Action, exit: () => void): void {
       exit();
       return;
   }
+}
+
+/**
+ * Enter on a history session: hand its most useful artifact to the OS. The PR
+ * url when the session produced one — that's the thing you review — otherwise
+ * the newest run's transcript, so a failed session is one keypress from its
+ * evidence. Narrates either way, so the keypress always visibly did something.
+ */
+function openSelectedSession(): void {
+  const session = selectedSession();
+  if (!session) return;
+  const target =
+    session.prUrl ?? [...session.runs].reverse().find((r) => r.logPath)?.logPath;
+  if (!target) {
+    logger.info(`${session.label} has nothing to open — no PR or transcript recorded`);
+    return;
+  }
+  logger.info(`opening ${target}`);
+  openExternal(target);
 }
 
 /**

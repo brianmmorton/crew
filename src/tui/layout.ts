@@ -15,41 +15,44 @@
  * fullscreen mode where it clears the terminal on every paint.
  */
 
-/** Header (2) + AGENTS title (1) + OUTPUT title (1) + footer (1). */
-const CHROME = 5;
+/**
+ * Header (2) + footer (1) + the AGENTS and OUTPUT panels' border rows (2
+ * each — title-in-border top line + bottom edge, see Panel.tsx).
+ */
+const CHROME = 7;
 export const MIN_FEED = 3;
 export const PANE_MIN = 3;
 export const PANE_MAX = 8;
 
 /**
  * Sidebar width budgeting. Unlike the height budget above, this is about
- * COLUMNS: every row in the main column is built from hard `padEnd` cells
- * (name 14 + kind 10 + schedule 10, before the status cell), so taking width
- * away truncates real content rather than whitespace.
+ * COLUMNS: taking width away from the main column truncates real content
+ * (agent rows shed their kind/schedule cells responsively, but below ~50
+ * columns even the name + status pair gets crushed).
  *
  * Below SIDEBAR_MIN_COLUMNS the sidebar is simply not drawn — a squeezed
  * agent row is worse than no history at all.
  */
-export const SIDEBAR_W = 30;
-export const SIDEBAR_MAX_W = 72;
-export const SIDEBAR_MIN_COLUMNS = 120;
+export const SIDEBAR_W = 32;
+export const SIDEBAR_MAX_W = 76;
+export const SIDEBAR_FOCUS_MAX_W = 96;
+export const SIDEBAR_MIN_COLUMNS = 100;
 
 /**
  * Sidebar width for a terminal width: 0 when too narrow or the user has it
- * off, otherwise SIDEBAR_W growing with the terminal up to SIDEBAR_MAX_W.
- *
- * It grows because the panel's content is text worth reading — PR urls,
- * failure reasons — and at the 30-column floor most of it truncates. The cap
- * is sized so a GitHub PR url (~50-60 chars plus the row's 7 columns of
- * chrome) survives untruncated and stays cmd+clickable; past that a very wide
- * terminal's spare columns do more good in the agent rows and feed. Pure, so
- * the thresholds are tested rather than eyeballed.
+ * off, otherwise about a third of the terminal — and closer to half while the
+ * panel is FOCUSED. The panel's content is text worth reading (PR urls,
+ * failure reasons), and focusing it is the "I want to read this now" gesture,
+ * so that's when it earns the extra columns: at ~72+ inner columns a GitHub
+ * PR url survives untruncated and stays cmd+clickable. Blurring hands the
+ * width back to the agent rows and feed. Pure, so the thresholds are tested
+ * rather than eyeballed.
  */
-export function sidebarWidth(columns: number, visible: boolean): number {
+export function sidebarWidth(columns: number, visible: boolean, focused = false): number {
   if (!visible || columns < SIDEBAR_MIN_COLUMNS) return 0;
-  // A third of the terminal, offset so the 120-column threshold still hands
-  // the sidebar exactly its floor (the main column needs 88+ for agent rows).
-  return Math.max(SIDEBAR_W, Math.min(SIDEBAR_MAX_W, Math.floor(columns / 3) - 10));
+  const share = focused ? Math.floor(columns * 0.45) : Math.floor(columns / 3) - 4;
+  const cap = focused ? SIDEBAR_FOCUS_MAX_W : SIDEBAR_MAX_W;
+  return Math.max(SIDEBAR_W, Math.min(cap, share));
 }
 
 export interface Layout {

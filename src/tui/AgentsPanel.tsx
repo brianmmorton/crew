@@ -26,14 +26,30 @@ interface BlockProps {
   isSelected: boolean;
   isExpanded: boolean;
   paneH: number;
+  width: number;
+}
+
+/**
+ * Which cells an agent row can afford at a given inner width. Rows shed their
+ * least-load-bearing columns first — the kind, then the schedule — instead of
+ * letting every cell truncate into confetti; the name and live status always
+ * survive. Pure and exported for tests.
+ */
+export function rowCells(width: number): { nameW: number; kindW: number; schedW: number } {
+  if (width >= 78) return { nameW: 14, kindW: 10, schedW: 10 };
+  if (width >= 64) return { nameW: 14, kindW: 0, schedW: 10 };
+  if (width >= 52) return { nameW: 12, kindW: 0, schedW: 8 };
+  return { nameW: 10, kindW: 0, schedW: 0 };
 }
 
 export const AgentsPanel = memo(function AgentsPanel({
   listRows,
   paneH,
+  width,
 }: {
   listRows: number;
   paneH: number;
+  width: number;
 }): React.ReactNode {
   const snap = useSnapshot(agentsStore);
   const start = windowStart(snap.items.length, listRows, snap.selected);
@@ -56,6 +72,7 @@ export const AgentsPanel = memo(function AgentsPanel({
           isSelected={start + i === snap.selected}
           isExpanded={Boolean(snap.expanded[a.name])}
           paneH={paneH}
+          width={width}
         />
       ))}
     </Box>
@@ -73,18 +90,21 @@ const AgentBlock = memo(function AgentBlock(props: BlockProps): React.ReactNode 
   );
 });
 
-function AgentRow({ name, kind, cadence, nextRun, index, isSelected, isExpanded }: BlockProps) {
+function AgentRow({ name, kind, cadence, nextRun, index, isSelected, isExpanded, width }: BlockProps) {
   const color = agentColor(name);
+  const cells = rowCells(width);
   return (
     <Text wrap="truncate-end">
       <Text color="cyanBright">{isSelected ? " ❯ " : "   "}</Text>
       <Text dimColor>{index < 9 ? `${index + 1} ` : "  "}</Text>
       <Text dimColor>{isExpanded ? "▾ " : "▸ "}</Text>
       <Text color={color} bold={isSelected}>
-        {name.padEnd(14)}
+        {name.padEnd(cells.nameW)}
       </Text>
-      <Text dimColor>{kind.padEnd(10)}</Text>
-      <ScheduleCell kind={kind} cadence={cadence} nextRun={nextRun} />
+      {cells.kindW > 0 && <Text dimColor>{kind.padEnd(cells.kindW)}</Text>}
+      {cells.schedW > 0 && (
+        <ScheduleCell kind={kind} cadence={cadence} nextRun={nextRun} pad={cells.schedW} />
+      )}
       <StatusCell name={name} kind={kind} />
     </Text>
   );
@@ -94,10 +114,12 @@ function ScheduleCell({
   kind,
   cadence,
   nextRun,
+  pad,
 }: {
   kind: AgentKind;
   cadence: string;
   nextRun: number | null;
+  pad: number;
 }) {
   // `.now` is read only when a countdown is on screen, so idle rows don't
   // subscribe to the 1s clock at all.
@@ -110,7 +132,10 @@ function ScheduleCell({
         : nextRun
           ? fmtUntil(nextRun, clock.now)
           : cadence || "manual";
-  return <Text dimColor>{cell.padEnd(10)}</Text>;
+  // Clamp into the cell (narrow panels hand out less than "continuous" needs)
+  // and keep the trailing space as the separator to the status cell.
+  const fit = cell.length > pad ? `${cell.slice(0, pad - 1)}…` : cell.padEnd(pad);
+  return <Text dimColor>{`${fit} `}</Text>;
 }
 
 /** The live status cell: run state for proposers, pool state for executors. */

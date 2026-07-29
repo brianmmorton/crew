@@ -8,17 +8,20 @@ import { Header } from "./Header.js";
 import { AgentsPanel } from "./AgentsPanel.js";
 import { HistorySidebar } from "./HistorySidebar.js";
 import { Feed } from "./Feed.js";
+import { Panel, PANEL_CHROME, PANEL_CHROME_W } from "./Panel.js";
 import { HISTORY_LEGEND, LEGEND } from "./keys.js";
 
 /**
  * The main screen. This component owns ONLY the height budget: it reads the
  * terminal size and the accordion shape, runs the layout math, and hands
  * fixed heights down. Everything below it subscribes to its own store, so
- * "dashboard re-rendered" costs four memoized children a prop compare.
+ * "dashboard re-rendered" costs a few memoized children a prop compare.
  *
  * The frame handed to Ink is constant-height for a given terminal size —
  * expanding a pane grows the accordion and shrinks the feed by exactly the
- * same rows. See layout.ts for why this invariant is load-bearing.
+ * same rows, and each section sits in its own bordered Panel whose 2 chrome
+ * rows are budgeted in layout.ts. See layout.ts for why this invariant is
+ * load-bearing.
  */
 export function Dashboard(): React.ReactNode {
   const app = useSnapshot(appStore);
@@ -36,11 +39,16 @@ export function Dashboard(): React.ReactNode {
   const { frameH, paneH, feedH } = computeLayout(app.rows, count, expandedVisible);
 
   // The sidebar is a WIDTH split and takes no rows, so the height budget above
-  // is untouched by it — the frame stays constant-height either way.
-  const sidebarW = sidebarWidth(app.columns, app.historyVisible);
+  // is untouched by it — the frame stays constant-height either way. It leans
+  // wider while focused: that's the "I'm reading this" gesture (layout.ts).
+  const historyFocused = app.focus === "history";
+  const sidebarW = sidebarWidth(app.columns, app.historyVisible, historyFocused);
+  const mainW = app.columns - sidebarW;
   // Rows between the header and the footer: what BOTH columns must occupy
   // exactly. Header is 2 lines, footer is 1.
   const bodyH = frameH - 3;
+  const agentsH = PANEL_CHROME + listRows + paneH * expandedVisible;
+  const outputH = PANEL_CHROME + feedH;
 
   return (
     <Box flexDirection="column" height={frameH} flexShrink={0}>
@@ -53,11 +61,19 @@ export function Dashboard(): React.ReactNode {
         Fixed heights on both sides, and no flexGrow anywhere in the frame.
       */}
       <Box flexDirection="row" height={bodyH} flexShrink={0}>
-        <Box flexDirection="column" width={app.columns - sidebarW} height={bodyH} flexShrink={0}>
-          <SectionTitle label="AGENTS" hint="↑↓ navigate · ⏎ expand" />
-          <AgentsPanel listRows={listRows} paneH={paneH} />
-          <SectionTitle label="OUTPUT" hint="all agents · unified" />
-          <Feed height={feedH} />
+        <Box flexDirection="column" width={mainW} height={bodyH} flexShrink={0}>
+          <Panel
+            title="AGENTS"
+            hint="↑↓ navigate · ⏎ expand · r run"
+            width={mainW}
+            height={agentsH}
+            focused={!historyFocused}
+          >
+            <AgentsPanel listRows={listRows} paneH={paneH} width={mainW - PANEL_CHROME_W} />
+          </Panel>
+          <Panel title="OUTPUT" hint="all agents · live" width={mainW} height={outputH}>
+            <Feed height={feedH} />
+          </Panel>
         </Box>
         {sidebarW > 0 && <HistorySidebar width={sidebarW} height={bodyH} />}
       </Box>
@@ -66,38 +82,17 @@ export function Dashboard(): React.ReactNode {
   );
 }
 
-const SectionTitle = memo(function SectionTitle({
-  label,
-  hint,
-}: {
-  label: string;
-  hint: string;
-}): React.ReactNode {
-  return (
-    <Text wrap="truncate-end">
-      <Text bold color="blueBright">
-        {" "}
-        {label}
-      </Text>
-      <Text dimColor>
-        {" ── "}
-        {hint}
-      </Text>
-    </Text>
-  );
-});
-
 /**
  * Subscribes to focus itself rather than taking it as a prop: the legend is
- * the only thing in the frame that changes on Tab, so this keeps a focus
- * switch to a one-line repaint.
+ * the only line in the frame (outside panel borders) that changes on Tab.
  */
 const Footer = memo(function Footer(): React.ReactNode {
   const focus = useSnapshot(appStore).focus;
+  const legend = focus === "history" ? HISTORY_LEGEND : LEGEND;
   return (
     <Text dimColor wrap="truncate-end">
       {" "}
-      {focus === "history" ? HISTORY_LEGEND : LEGEND}
+      {legend}
     </Text>
   );
 });
