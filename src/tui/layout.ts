@@ -31,7 +31,7 @@ export const PANE_MAX = 8;
  * agent row is worse than no history at all.
  */
 export const SIDEBAR_W = 30;
-export const SIDEBAR_MAX_W = 46;
+export const SIDEBAR_MAX_W = 72;
 export const SIDEBAR_MIN_COLUMNS = 120;
 
 /**
@@ -39,15 +39,17 @@ export const SIDEBAR_MIN_COLUMNS = 120;
  * off, otherwise SIDEBAR_W growing with the terminal up to SIDEBAR_MAX_W.
  *
  * It grows because the panel's content is text worth reading — PR urls,
- * failure reasons — and at the 30-column floor most of it truncates. It stops
- * at SIDEBAR_MAX_W so a very wide terminal doesn't hand the sidebar space the
- * agent rows and feed can use better. Pure, so the thresholds are tested
- * rather than eyeballed.
+ * failure reasons — and at the 30-column floor most of it truncates. The cap
+ * is sized so a GitHub PR url (~50-60 chars plus the row's 7 columns of
+ * chrome) survives untruncated and stays cmd+clickable; past that a very wide
+ * terminal's spare columns do more good in the agent rows and feed. Pure, so
+ * the thresholds are tested rather than eyeballed.
  */
 export function sidebarWidth(columns: number, visible: boolean): number {
   if (!visible || columns < SIDEBAR_MIN_COLUMNS) return 0;
-  // A quarter of the terminal, clamped — the main column keeps the rest.
-  return Math.max(SIDEBAR_W, Math.min(SIDEBAR_MAX_W, Math.floor(columns / 4)));
+  // A third of the terminal, offset so the 120-column threshold still hands
+  // the sidebar exactly its floor (the main column needs 88+ for agent rows).
+  return Math.max(SIDEBAR_W, Math.min(SIDEBAR_MAX_W, Math.floor(columns / 3) - 10));
 }
 
 export interface Layout {
