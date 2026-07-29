@@ -5,6 +5,7 @@ import type { Snapshot } from "./snapshot.js";
 import { Logo } from "./Logo.js";
 import { store } from "./store.js";
 import type { DeepReadonly } from "./deepReadonly.js";
+import { useRenderTrace } from "./useRenderTrace.js";
 
 function poolCounts(slots: DeepReadonly<Snapshot["slots"]>): string | null {
   if (!slots) return null;
@@ -19,6 +20,7 @@ function poolCounts(slots: DeepReadonly<Snapshot["slots"]>): string | null {
  */
 export const Header = React.memo(function Header() {
   const { snap, headerLogo: logoArt } = useSnapshot(store);
+  useRenderTrace("Header", { snap, logoArt });
   if (!snap) return null;
   const pool = poolCounts(snap.slots);
   return (

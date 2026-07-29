@@ -2,6 +2,8 @@ import React, { useEffect, useState } from "react";
 import { Box, Text } from "ink";
 import { Logo } from "./Logo.js";
 import type { LogoArt } from "./logoArt.js";
+import { traceCount } from "./debug.js";
+import { useRenderTrace } from "./useRenderTrace.js";
 
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const FRAME_MS = 120;
@@ -23,8 +25,16 @@ function subscribe(fn: () => void): () => void {
   if (!ticker) {
     ticker = setInterval(() => {
       frame = (frame + 1) % FRAMES.length;
+      // One tick fans out to every mounted Spinner, and each one is a React
+      // state update — so the interesting number here is the subscriber count,
+      // not the tick itself. N subscribers means N re-renders per 120ms.
+      traceCount("spinner:tick", () => `frame=${frame} subscribers=${subscribers.size}`);
       for (const sub of subscribers) sub();
     }, FRAME_MS);
+    // The animation is decoration; it must never be the reason the process is
+    // still alive. Without this an exit path that leaves a spinner mounted
+    // keeps the event loop busy at 120ms forever instead of letting node exit.
+    ticker.unref?.();
   }
   return () => {
     subscribers.delete(fn);
@@ -38,6 +48,7 @@ function subscribe(fn: () => void): () => void {
 /** A quiet braille spinner, reused anywhere something is in flight but has no progress to show. */
 export function Spinner({ color = "cyan" }: { color?: string }) {
   const [, forceRender] = useState(0);
+  useRenderTrace("Spinner");
   useEffect(() => subscribe(() => forceRender((n) => n + 1)), []);
   return <Text color={color}>{FRAMES[frame]}</Text>;
 }
@@ -51,11 +62,15 @@ const WORDMARK = "crew";
  * more deliberate than a spinner alone.
  */
 export function LoadingSplash({ label, logoArt }: { label: string; logoArt?: LogoArt | null }) {
-  const [pos, setPos] = useState(0);
-  useEffect(() => {
-    const timer = setInterval(() => setPos((n) => (n + 1) % WORDMARK.length), 140);
-    return () => clearInterval(timer);
-  }, []);
+  // Driven off the same shared ticker as Spinner rather than a private 140ms
+  // interval. Two independent timers meant two out-of-phase repaints of the
+  // same frame, and the splash is on screen exactly when the logo fetch is
+  // also landing and changing the frame's height — the worst moment to be
+  // repainting on a clock nothing else is aligned to.
+  const [, forceRender] = useState(0);
+  useEffect(() => subscribe(() => forceRender((n) => n + 1)), []);
+  const pos = frame % WORDMARK.length;
+  useRenderTrace("LoadingSplash", { pos, logoArt });
   if (logoArt) {
     return (
       <Box flexDirection="column">

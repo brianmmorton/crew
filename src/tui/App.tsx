@@ -27,6 +27,8 @@ import {
   takeTrackerDirty,
   invalidateTrackerCounts,
 } from "./store.js";
+import { trace, traceCount, startDebug, stopDebug, debugFilePath } from "./debug.js";
+import { useRenderTrace } from "./useRenderTrace.js";
 
 /** Local-only refresh: log tail, worktree pool, claims. Cheap, no network. */
 const POLL_MS = 1000;
@@ -63,10 +65,11 @@ let started = false;
 let ports: Ports | null = null;
 
 
-function startBackground(cfg: CrewConfig): void {
+function startBackground(cfg: CrewConfig, verbose: boolean): void {
   if (started) return;
   started = true;
 
+  if (verbose) startDebug(debugFilePath(cfg.configDir));
   logToFile(logFilePath(cfg.configDir));
 
   const url = cfg.ui.logoUrl;
@@ -92,6 +95,13 @@ function startBackground(cfg: CrewConfig): void {
   // Previous tick's local signals, for spotting the moment work moved.
   let lastBusySlots = -1;
   let lastClaimCount = -1;
+
+  // Built once and reused across ticks. LogTail's whole purpose is the byte
+  // offset it carries between reads; constructing a fresh one per tick reset
+  // that offset every second, and its cold-start path seeks to `size - 64KB`,
+  // so every poll re-read and re-appended the tail of the log as if it were
+  // new output. That alone republished store.logLines once a second forever.
+  const tail = new LogTail(logFilePath(cfg.configDir));
 
   async function refreshCounts(): Promise<void> {
     if (!ports || countsInFlight) return;
@@ -135,8 +145,12 @@ function startBackground(cfg: CrewConfig): void {
 
     // Skips the write when nothing visible moved, so an idle TUI stops
     // re-rendering the dashboard once a second.
-    publishSnapshot(next);
-    appendLogLines(new LogTail(next.logPath).read());
+    const published = publishSnapshot(next);
+    traceCount(published ? "snapshot:published" : "snapshot:skipped");
+
+    const newLines = tail.read();
+    if (newLines.length) traceCount("log:appended", () => `lines=${newLines.length}`);
+    appendLogLines(newLines);
 
     if (next.supervisorAlive && !warnedDoubleRun) {
       warnedDoubleRun = true;
@@ -171,21 +185,27 @@ function startBackground(cfg: CrewConfig): void {
 function stopBackground(): void {
   requestStop();
   runManager.stopAll();
+  // Last thing, so the summary counts every frame including this teardown.
+  stopDebug();
 }
 
 /** Thin shell: bootstraps background effects and routes input, but never subscribes to store itself — only leaf components (Header/AgentList/LogPanel/Dashboard) re-render on store changes. */
-export function App({ cfg }: { cfg: CrewConfig }) {
+export function App({ cfg, verbose = false }: { cfg: CrewConfig; verbose?: boolean }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
 
   useEffect(() => {
-    startBackground(cfg);
+    startBackground(cfg, verbose);
     return stopBackground;
   }, []);
 
   useEffect(() => {
     if (!stdout) return;
     const onResize = () => {
+      // Written unconditionally, so a resize event carrying the same height
+      // still churns the store. If the trace shows these firing without the
+      // window moving, that's a flicker source by itself.
+      traceCount("resize", () => `rows=${stdout.rows} prev=${store.rows}`);
       store.rows = stdout.rows;
     };
     onResize(); // seed from the real terminal, not the store's 24-row default
@@ -235,13 +255,24 @@ export function App({ cfg }: { cfg: CrewConfig }) {
  */
 export function Screen({ implWorkers }: { implWorkers: number }) {
   const snap = useSnapshot(store);
+  useRenderTrace("Screen", {
+    snap: snap.snap,
+    rows: snap.rows,
+    expanded: snap.expanded,
+    runs: snap.runs,
+    splashLogo: snap.splashLogo,
+  });
 
   // Only `expanded` with a live run shows the run view. A stale name (run
   // never started) just falls through to the dashboard — clearing it here
   // would be a store mutation during render, which re-enters the renderer
   // and tears the frame.
   if (snap.expanded && snap.runs.has(snap.expanded)) {
-    return <RunView agent={snap.expanded} height={Math.max(4, snap.rows - 6)} />;
+    // No lower clamp: `Math.max(4, …)` guaranteed a 9-line view on a 5-row
+    // terminal, which is the overflow this whole layout is written to avoid.
+    // RunView subtracts its own chrome from this, so what it gets is the total
+    // line budget — rows minus the reserved cursor line.
+    return <RunView agent={snap.expanded} height={snap.rows - 1} />;
   }
 
   if (!snap.snap) {
@@ -262,6 +293,26 @@ export function Screen({ implWorkers }: { implWorkers: number }) {
 
   const agentRows = snap.snap.agentRows;
 
+  // Truncation drops from the end, so severity has to be the array order or
+  // the dropped item is arbitrary. `stuckItems()` already sorts this way, but
+  // it isn't the only producer — the stories build fixtures by hand — and a
+  // frame that silently hides the abandoned item while showing two healthy
+  // ones is the exact failure this section exists to prevent. Sorted here so
+  // the guarantee belongs to the code doing the cutting.
+  const STUCK_RANK = { abandoned: 0, fixing: 1, working: 2 } as const;
+  const stuckBySeverity = [...snap.snap.stuck].sort(
+    (a, b) => STUCK_RANK[a.state] - STUCK_RANK[b.state],
+  );
+
+  // "Is the executor mid-cycle right now", from the two local signals that
+  // actually say so: an item claimed by a live worker, or a busy worktree slot.
+  // The executor row used to animate whenever the implementer wasn't paused,
+  // which is true even when there is no work at all — so the spinner ran
+  // forever and repainted the frame with it.
+  const executorBusy =
+    snap.snap.stuck.some((s) => s.state === "working") ||
+    (snap.snap.slots?.some((s) => s.state === "busy") ?? false);
+
   // Budget the frame against the real terminal height. A frame taller than
   // the window scrolls its own top off screen, which reads as the UI
   // duplicating itself — so nothing here gets a lower clamp that could push
@@ -277,9 +328,24 @@ export function Screen({ implWorkers }: { implWorkers: number }) {
   // is near-static. On a short window the stuck work is what you need to see.
   const headerLines = 3 + (snap.snap.mcpOAuth.length > 0 ? 1 : 0);
   const footerLines = 2;
-  let budget = snap.rows - headerLines - footerLines;
+  // One line is held back so the frame never occupies the terminal's last row.
+  // A frame exactly `rows` tall leaves nowhere for the cursor to rest after the
+  // final newline, so the terminal scrolls by one; Ink's record of where the
+  // frame starts is then off by a line, it can't diff against it, and every
+  // subsequent update becomes an erase-and-repaint of the whole screen. With
+  // the always-on executor spinner that meant a full repaint 8x a second on a
+  // completely idle TUI. Measured: 1614 bytes/s written at `rows`, 748 at
+  // `rows - 1`, the rest being the spinner's own one-cell diff.
+  const cursorLine = 1;
+  let budget = snap.rows - headerLines - footerLines - cursorLine;
 
-  const maxStuck = Math.max(0, budget - 2);
+  // In-flight claims first, but not to the point of erasing the agent list
+  // outright: when there are agents to show, it leaves them a label and one
+  // row. Its own overflow is already reported ("+N more"), so a truncated
+  // in-flight list still says something is wrong — whereas a missing AGENTS
+  // section just looks like the TUI found no agents.
+  const agentsFloor = agentRows.length > 0 ? 2 : 0;
+  const maxStuck = Math.max(0, budget - 2 - agentsFloor);
   const visibleStuck = Math.min(snap.snap.stuck.length, maxStuck);
   budget -= visibleStuck > 0 ? 2 + visibleStuck : 0;
 
@@ -295,16 +361,44 @@ export function Screen({ implWorkers }: { implWorkers: number }) {
   const logHeight = budget - 2;
   const showLog = logHeight >= 1;
 
+  // The single most useful line in the trace. A frame taller than the terminal
+  // scrolls its own top off screen, and Ink's incremental renderer can't diff
+  // against a frame that moved — it falls back to erase-and-repaint, which is
+  // exactly what aggressive flicker looks like. `total` is what this frame will
+  // actually occupy; anything >= rows is a bug regardless of render counts.
+  const stuckTotal = snap.snap.stuck.length;
+  trace("layout", () => {
+    const total =
+      headerLines +
+      (showAgents ? 1 + visibleAgents : 0) +
+      (showLog ? 2 + logHeight : 0) +
+      (visibleStuck > 0 ? 2 + visibleStuck : 0) +
+      footerLines;
+    // Compared against rows-1, not rows: occupying the last row is what
+    // triggers the scroll-and-full-repaint, so that is the real ceiling.
+    return (
+      `rows=${snap.rows} total=${total}${total > snap.rows - cursorLine ? " OVERFLOW" : ""} ` +
+      `header=${headerLines} agents=${visibleAgents}/${agentRows.length} ` +
+      `log=${showLog ? logHeight : 0} stuck=${visibleStuck}/${stuckTotal}`
+    );
+  });
+
   return (
     <Box flexDirection="column">
       <Header />
-      {showAgents && <AgentList implWorkers={implWorkers} maxRows={visibleAgents} />}
+      {showAgents && (
+        <AgentList
+          implWorkers={implWorkers}
+          maxRows={visibleAgents}
+          executorBusy={executorBusy}
+        />
+      )}
       {showLog && (
         <Box marginTop={1}>
           <LogPanel height={logHeight} />
         </Box>
       )}
-      <InFlight items={snap.snap.stuck.slice(0, visibleStuck)} total={snap.snap.stuck.length} />
+      <InFlight items={stuckBySeverity.slice(0, visibleStuck)} total={stuckBySeverity.length} />
       <Box marginTop={1}>
         <Text dimColor>
           [↑↓] select  [enter] run / view  [p] pause/resume implementer  [q] quit

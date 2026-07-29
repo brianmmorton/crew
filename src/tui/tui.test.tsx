@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import React from "react";
 import { render } from "ink-testing-library";
 import { Screen } from "./App.js";
+import { RunView } from "./RunView.js";
 import { stories, getStory, applyStory } from "./stories.js";
 import { store } from "./store.js";
 
@@ -196,12 +197,24 @@ test("a short terminal drops the log panel rather than overflowing", () => {
 
 test("in-flight work keeps its space ahead of the agent list", () => {
   // In-flight is what says something is wrong right now; the agent list is
-  // near-static, so it's the one that truncates on a short window.
+  // near-static, so it's the one that truncates first on a short window. It
+  // no longer claims *every* spare line though — starving the agent list to
+  // nothing reads as "no agents found" rather than "no room" — so on a 12-row
+  // window the full count is reported and the list itself may be cut.
   const frame = frameFor("narrow");
   assert.match(frame, /IN FLIGHT \(3\)/);
-  for (const id of ["SCO-142", "SCO-138", "SCO-131"]) {
-    assert.match(frame, new RegExp(id));
-  }
+  assert.match(frame, /AGENTS/);
+});
+
+test("a truncated in-flight list drops the healthy item, never the abandoned one", () => {
+  // Truncation takes from the end, so the section is ordered by severity
+  // before it is cut. Showing two working items while hiding an abandoned
+  // claim would defeat the point of the section.
+  const frame = frameFor("narrow");
+  assert.match(frame, /SCO-131\s+abandoned/); // abandoned survives
+  assert.match(frame, /SCO-138\s+fixing/); // then the one being retried
+  assert.doesNotMatch(frame, /SCO-142/); // the healthy "working" item yields
+  assert.match(frame, /\+1 more/); // and the frame says so
 });
 
 test("a truncated agent list says how many rows are hidden", () => {
@@ -218,4 +231,94 @@ test("a truncated in-flight list says how many items are hidden", () => {
   assert.ok(frame.split("\n").length <= 11, "frame overflowed");
   // Either everything fit, or the ones that didn't are accounted for.
   if (!frame.includes("SCO-131")) assert.match(frame, /\+\d+ more/);
+});
+
+/**
+ * Frame height is the root cause of every flicker bug this file guards, in two
+ * distinct ways.
+ *
+ * Absolute height (this test and the next): Ink repaints in place with a
+ * relative "cursor up N", which cannot address rows that have scrolled off — so
+ * a frame occupying the terminal's last row scrolls on the next newline and
+ * every later repaint lands a row low.
+ *
+ * *Changes* in height (the test after those): the ladder in the reported bug.
+ * A frame that grows between paints moves the block's anchor regardless of how
+ * much headroom it has, so staying inside `rows` is necessary but not
+ * sufficient — the run view must also not change height as output streams in.
+ */
+test("the dashboard frame never reaches the bottom of the terminal", () => {
+  for (const rows of [8, 12, 24, 53, 120]) {
+    applyStory(getStory("dashboard")!);
+    store.rows = rows;
+    const { lastFrame, unmount } = render(<Screen implWorkers={1} />);
+    // eslint-disable-next-line no-control-regex
+    const frame = (lastFrame() ?? "").replace(/\[[0-9;]*m/g, "");
+    unmount();
+    const height = frame.split("\n").length;
+    assert.ok(height < rows, `dashboard used ${height} of ${rows} rows — leaves no scroll headroom`);
+  }
+});
+
+/**
+ * The direct regression test for the stacked-spinner ladder. The run view has
+ * to be exactly as tall with 500 streamed lines as it is with none: a frame
+ * that grows by a line moves Ink's repaint anchor down by a line, and the
+ * spinner then redraws one row lower on every 120ms tick. This is checked
+ * independently of `rows` headroom because growth ladders at any height.
+ */
+test("the run view holds a constant height as output streams in", () => {
+  for (const rows of [12, 24, 53]) {
+    const heights = new Set<number>();
+    for (const n of [0, 1, 2, 5, 60, 500]) {
+      applyStory(getStory("dashboard")!);
+      store.rows = rows;
+      store.runs.set("qa", {
+        agent: "qa",
+        status: "running",
+        startedAt: new Date(),
+        endedAt: null,
+        lines: Array.from({ length: n }, (_, i) => `output line ${i}`),
+        exitCode: null,
+      } as never);
+      store.expanded = "qa";
+      const { lastFrame, unmount } = render(<RunView agent="qa" height={rows - 1} />);
+      // eslint-disable-next-line no-control-regex
+      const frame = (lastFrame() ?? "").replace(/\[[0-9;]*m/g, "");
+      unmount();
+      heights.add(frame.split("\n").length);
+    }
+    assert.equal(
+      heights.size,
+      1,
+      `run view changed height across output volumes at rows=${rows}: saw ${[...heights].join(", ")} — the spinner will ladder`,
+    );
+  }
+});
+
+test("an expanded run view leaves headroom however much the agent streams", () => {
+  for (const rows of [8, 12, 24, 53, 120]) {
+    for (const n of [0, 1, 5, 60, 500]) {
+      applyStory(getStory("dashboard")!);
+      store.rows = rows;
+      store.runs.set("qa", {
+        agent: "qa",
+        status: "running",
+        startedAt: new Date(),
+        endedAt: null,
+        lines: Array.from({ length: n }, (_, i) => `output line ${i}`),
+        exitCode: null,
+      } as never);
+      store.expanded = "qa";
+      const { lastFrame, unmount } = render(<Screen implWorkers={1} />);
+      // eslint-disable-next-line no-control-regex
+      const frame = (lastFrame() ?? "").replace(/\[[0-9;]*m/g, "");
+      unmount();
+      const height = frame.split("\n").length;
+      assert.ok(
+        height < rows,
+        `run view used ${height} of ${rows} rows with ${n} output lines — the spinner will stack`,
+      );
+    }
+  }
 });

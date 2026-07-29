@@ -384,14 +384,22 @@ program
 program
   .command("tui")
   .description("Live status screen: agents, log tail, and in-flight work")
-  .action(async () => {
+  .option(
+    "-v, --verbose",
+    "trace every render to <configDir>/logs/tui-debug.log (for diagnosing flicker)",
+  )
+  .action(async (opts: { verbose?: boolean }) => {
     const cfg = loadConfig();
     // Quiet: warn to the log file on missing prereqs (OAuth logins included)
     // and continue — the header now surfaces OAuth login state live, so this
     // is a startup nudge into the log, not a gate.
     await runDoctor(cfg, logger, true);
     const { runTui } = await import("../tui/index.js");
-    await runTui(cfg);
+    const { debugFilePath } = await import("../tui/debug.js");
+    await runTui(cfg, opts.verbose === true);
+    // Printed after the TUI has released the screen, so it survives on the
+    // terminal instead of being erased with the last frame.
+    if (opts.verbose) console.log(`render trace: ${debugFilePath(cfg.configDir)}`);
   });
 
 const worktreeCmd = program

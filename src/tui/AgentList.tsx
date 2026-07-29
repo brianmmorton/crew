@@ -6,6 +6,7 @@ import type { AgentRun } from "./runManager.js";
 import { Spinner } from "./Spinner.js";
 import { store } from "./store.js";
 import type { DeepReadonly } from "./deepReadonly.js";
+import { useRenderTrace } from "./useRenderTrace.js";
 
 function schedule(row: DeepReadonly<AgentRow>): string {
   if (row.agent.kind === "executor") return "continuous";
@@ -27,13 +28,35 @@ const RUN_BADGE: Record<Exclude<AgentRun["status"], "running">, { text: string; 
 export const AgentList = React.memo(function AgentList({
   implWorkers,
   maxRows,
+  /**
+   * Whether the executor is actually mid-cycle on something. Only then does
+   * its row animate: the spinner is a shared 120ms ticker, and an unconditional
+   * one on the always-present executor row re-rendered this list ~8x a second
+   * forever, even on a fully idle TUI with no work in flight. An idle executor
+   * now shows a static mark instead, so a quiet dashboard issues no repaints.
+   */
+  executorBusy = false,
 }: {
   implWorkers: number;
   /** Rows the frame has room for; the rest are dropped so it can't overflow. */
   maxRows?: number;
+  executorBusy?: boolean;
 }) {
   const snap = useSnapshot(store);
   const all = snap.snap?.agentRows ?? [];
+  // `agentRows` is watched by identity: the poller rebuilds a whole Snapshot
+  // every tick, so if publishSnapshot's equality check ever lets an unchanged
+  // tick through, it shows up here as agentRows changing once a second with no
+  // visible difference on screen.
+  useRenderTrace("AgentList", {
+    maxRows,
+    implWorkers,
+    executorBusy,
+    agentRows: all,
+    runs: snap.runs,
+    selected: snap.selected,
+    implPaused: snap.implPaused,
+  });
   const rows = maxRows === undefined ? all : all.slice(0, maxRows);
   // Clamped rather than read raw: the row list can shrink between polls, and
   // a stale index would otherwise paint no cursor at all (or, before rows
@@ -70,10 +93,13 @@ export const AgentList = React.memo(function AgentList({
               <Text dimColor>{schedule(row)}</Text>
             </Box>
             {isExecutor && implPaused && <Text dimColor>⏸ paused</Text>}
-            {isExecutor && !implPaused && (
+            {isExecutor && !implPaused && executorBusy && (
               <Text color="yellow">
                 <Spinner color="yellow" /> running ({implWorkers}w)
               </Text>
+            )}
+            {isExecutor && !implPaused && !executorBusy && (
+              <Text dimColor>○ idle ({implWorkers}w)</Text>
             )}
             {!isExecutor && run?.status === "running" && (
               <Text color="yellow">

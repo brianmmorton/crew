@@ -2,6 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import { useSnapshot } from "valtio";
 import { store } from "./store.js";
+import { useRenderTrace } from "./useRenderTrace.js";
 
 const LEVEL_COLOR: Record<string, string> = {
   INFO: "blue",
@@ -53,6 +54,10 @@ const LogLine = React.memo(function LogLine({ line }: { line: string }) {
  */
 export const LogPanel = React.memo(function LogPanel({ height }: { height: number }) {
   const { logLines } = useSnapshot(store);
+  // `height` and `logLines` are the only two inputs, so the changed= list on
+  // each trace line says outright whether this panel is repainting because new
+  // output arrived or because the frame's layout math handed it a new height.
+  useRenderTrace("LogPanel", { height, logLines, count: logLines.length });
   // `start` is the visible window's offset into the whole buffer, so each row
   // can be keyed by its absolute position rather than its index in the slice.
   const start = Math.max(0, logLines.length - height);
