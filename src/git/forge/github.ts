@@ -59,4 +59,20 @@ export class GitHubForge implements ForgePort {
       maxBuffer: 16 * 1024 * 1024,
     });
   }
+
+  /**
+   * URL of an already-open PR whose head is `branch`, or null. Consulted
+   * before a resumed push, so a branch an earlier (since-forgotten) cycle
+   * already landed upstream is recognized instead of retried as a doomed
+   * fast-forward push.
+   */
+  async findOpenPr(branch: string): Promise<string | null> {
+    const { stdout } = await pExecFile(
+      "gh",
+      ["pr", "list", "--head", branch, "--state", "open", "--json", "url"],
+      { cwd: this.repoPath, maxBuffer: 16 * 1024 * 1024 },
+    );
+    const rows = JSON.parse(stdout || "[]") as { url?: string }[];
+    return rows[0]?.url ?? null;
+  }
 }

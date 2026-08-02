@@ -103,6 +103,7 @@ function queuePorts(items: WorkItem[]) {
       push: async () => {},
       openPr: async () => "https://pr/1",
       commentOnPr: async () => {},
+      findOpenPr: async () => null,
       removeWorktree: async () => {},
       retainWorktree: async () => {},
     },

@@ -664,17 +664,38 @@ async function landCommit(
   const S = cfg.tracker.statuses;
 
   logger.info(`${exec.name} ${item.identifier}: pushing ${branch}…`);
-  await ports.git.push(wt, branch);
-  logger.info(`${exec.name} ${item.identifier}: pushed; opening PR against ${cfg.repo.baseBranch}…`);
-  const url = await ports.git.openPr({
-    repoPath: cfg.repo.path,
-    branch,
-    baseBranch: cfg.repo.baseBranch,
-    title: item.title,
-    body: prBody(item),
-    assignee: "@me",
-    label: "agent-authored",
-  });
+  let url: string;
+  try {
+    await ports.git.push(wt, branch);
+    logger.info(`${exec.name} ${item.identifier}: pushed; opening PR against ${cfg.repo.baseBranch}…`);
+    url = await ports.git.openPr({
+      repoPath: cfg.repo.path,
+      branch,
+      baseBranch: cfg.repo.baseBranch,
+      title: item.title,
+      body: prBody(item),
+      assignee: "@me",
+      label: "agent-authored",
+    });
+  } catch (e) {
+    // A rejected push usually means the branch already moved upstream — most
+    // often because an earlier cycle already pushed and opened a PR, and the
+    // tracker item ended up back in a re-implementable state anyway (e.g. a
+    // human moved it, or a later step in that same cycle failed after the PR
+    // was already live). Recognizing the existing PR here turns that into a
+    // no-op instead of 3 identical doomed pushes followed by discarding a
+    // perfectly good worktree.
+    const existingPr = await Promise.resolve()
+      .then(() => ports.git.findOpenPr(branch))
+      .catch(() => null);
+    if (!existingPr) throw e;
+    logger.warn(
+      `${exec.name} ${item.identifier}: push rejected, but ${branch} already has an open PR — ` +
+        `recognizing it instead of retrying the push`,
+      { error: String(e) },
+    );
+    url = existingPr;
+  }
 
   await ports.tracker.transition(item.id, S.review);
   await ports.tracker.assign(item.id, ports.meta.myUserId);

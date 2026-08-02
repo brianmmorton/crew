@@ -531,6 +531,10 @@ export class GitAdapter implements GitPort {
     await this.forge.commentOnPr(prUrl, body);
   }
 
+  async findOpenPr(branch: string): Promise<string | null> {
+    return this.forge.findOpenPr(branch);
+  }
+
   /**
    * Give up a worktree.
    *

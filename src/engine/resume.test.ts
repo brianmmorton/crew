@@ -60,6 +60,8 @@ interface Sim {
   stray?: { commits: string[]; dirtyFiles: string[] };
   /** The user's own uncommitted work, present before the run starts. */
   preexistingDirty?: string[];
+  /** findOpenPr's return when a push fails — simulates a branch already landed upstream. */
+  existingPrOnPushFail?: string | null;
 }
 
 interface Rec {
@@ -170,6 +172,7 @@ function harness(sim: Sim = {}) {
         return "https://pr/1";
       },
       commentOnPr: async () => {},
+      findOpenPr: async () => sim.existingPrOnPushFail ?? null,
       removeWorktree: async (p: string) => {
         rec.removed.push(p);
       },
@@ -212,6 +215,25 @@ test("a PR-creation failure preserves the worktree", async () => {
   const out = await implementerCycle(cfg, ports, silent);
   assert.equal(out.status, "error");
   assert.deepEqual(rec.removed, []);
+});
+
+test("a rejected push recognizes an already-open PR instead of retrying", async () => {
+  const { cfg, ports, rec } = harness({
+    pushFails: true,
+    existingPrOnPushFail: "https://github.com/o/r/pull/22",
+  });
+  const out = await implementerCycle(cfg, ports, silent);
+  assert.equal(out.status, "pr-opened");
+  assert.equal((out as { url?: string }).url, "https://github.com/o/r/pull/22");
+  assert.deepEqual(rec.removed, ["/wt/fresh"], "landed — the worktree is no longer needed");
+  assert.ok(rec.transitions.includes("In Review"));
+});
+
+test("a rejected push with no existing PR still preserves the worktree and errors", async () => {
+  const { cfg, ports, rec } = harness({ pushFails: true, existingPrOnPushFail: null });
+  const out = await implementerCycle(cfg, ports, silent);
+  assert.equal(out.status, "error");
+  assert.deepEqual(rec.removed, [], "worktree must NOT be removed — nothing landed");
 });
 
 test("a successful run still removes the worktree", async () => {

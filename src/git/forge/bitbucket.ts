@@ -161,4 +161,15 @@ export class BitbucketForge implements ForgePort {
       { method: "POST", body: { content: { raw: body } } },
     );
   }
+
+  async findOpenPr(branch: string): Promise<string | null> {
+    const q = encodeURIComponent(
+      `state="OPEN" AND source.branch.name="${branch}"`,
+    );
+    const found = (await this.api(
+      `/repositories/${this.repoSlug}/pullrequests?q=${q}`,
+      { method: "GET" },
+    )) as { values?: { links?: { html?: { href?: string } } }[] };
+    return found?.values?.[0]?.links?.html?.href ?? null;
+  }
 }

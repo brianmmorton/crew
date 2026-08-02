@@ -611,6 +611,13 @@ export interface ForgePort {
   openPr(opts: OpenPrOptions): Promise<string>;
   /** Post a comment on an existing PR (used by reviewer agents). */
   commentOnPr(prUrl: string, body: string): Promise<void>;
+  /**
+   * URL of an already-open PR with this head branch, or null. Checked before
+   * pushing a resumed commit so a branch that already landed upstream (by an
+   * earlier, since-forgotten cycle) is recognized instead of retried as a
+   * fresh push against history it can never fast-forward onto.
+   */
+  findOpenPr(branch: string): Promise<string | null>;
 }
 
 /**
@@ -659,6 +666,8 @@ export interface GitPort {
   openPr(opts: OpenPrOptions): Promise<string>;
   /** Post a comment on an existing PR (used by reviewer agents). */
   commentOnPr(prUrl: string, body: string): Promise<void>;
+  /** URL of an already-open PR with this head branch, or null. */
+  findOpenPr(branch: string): Promise<string | null>;
   removeWorktree(worktreePath: string): Promise<void>;
   /**
    * Mark a worktree as holding work that must survive — a verified commit that
