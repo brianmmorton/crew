@@ -585,6 +585,15 @@ export class JiraAdapter implements TrackerPort {
       .map((i) => this.toWorkItem(i));
   }
 
+  async listOpen(): Promise<WorkItem[]> {
+    this.ensureMeta();
+    const issues = await this.client.search(
+      `${this.scope()} AND statusCategory != Done`,
+      { maxResults: PAGE },
+    );
+    return issues.map((i) => this.toWorkItem(i));
+  }
+
   async addComment(issueId: string, body: string): Promise<void> {
     await this.client.addComment(issueId, body);
   }

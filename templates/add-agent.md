@@ -44,6 +44,16 @@ Based on the kind, work out with the user:
   `maxInProgress` (pause while this many tracker items are in progress; keep it
   low so proposals see prior work land) and `maxIterations` (backstop, default
   12). Drain agents take no `cadence` — that combination is a config error.
+  Each iteration files ONE proposal by default (`maxProposals` raises it), each
+  sized for one reviewable PR.
+
+  CRITICAL for the prompt body (step 3): a drain agent is still a proposer —
+  it FILES the next batch of work, it never performs the migration itself. Write
+  the body as "describe the next task to file" ("file a task naming the next
+  files to migrate and the conventions to follow"), never as a work order
+  ("migrate the files, verify, commit") — the latter makes the agent try to do
+  the work in the user's checkout, which crew will fail loudly as a guardrail
+  violation.
 - **executor**: `claims` — the labels that route work items to this agent
   instead of the default `implementer`. Ask what labels or item types should go
   to this agent specifically.

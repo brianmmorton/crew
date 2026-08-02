@@ -443,19 +443,34 @@ it manually — from the TUI run key, or `crew drain <name>`:
 mode: drain
 doneWhen: "! grep -rl '@jest/globals' src --include='*.test.*'"
 maxInProgress: 2
-maxProposals: 4
 description: "Migrates jest tests to vitest until none remain"
 ---
 
-You are the vitest migration agent. Find jest test files not yet migrated and
-file one task per file describing the migration…
+You are the vitest migration agent. Look at what remains (the completion
+check's output is provided to you) and FILE a task describing the next small
+batch to migrate — which files, what the conventions are, what done looks
+like. You never migrate anything yourself.
 ```
 
+**Write the persona body as a description of what to *file*, not what to
+*do*.** A body that reads like a work order ("migrate the files, verify,
+commit") tells the agent to be an implementer, and it will try. Crew defends
+against that in depth — proposer runs have their file-editing tools removed,
+and a tripwire snapshots your checkout around every proposer run: new commits
+during a run fail it loudly with recovery instructions instead of reporting a
+quiet success — but the prompt is still what sets the agent's intent, so write
+it as "describe the next task", never "do the next task".
+
 A drain session loops: check `doneWhen`, propose, wait while the executor works,
-repeat. Between iterations it **waits until fewer than `maxInProgress` items are
-in progress**, so each round of proposals is made against a repo that reflects
-the work already done — not stacked blind on top of in-flight tasks that would
-overlap it. The session ends when:
+repeat. Each iteration files **one proposal by default** (set `maxProposals` to
+raise it) — each proposal becomes a PR a human reviews, so the session's pace is
+set by work landing, not by how fast the agent can flood the board. The agent is
+shown the board's open issues, the completion check's output, and everything the
+session already filed, so each proposal covers new ground. Between iterations it
+**waits until fewer than `maxInProgress` items are in progress**, so each round
+of proposals is made against a repo that reflects the work already done — not
+stacked blind on top of in-flight tasks that would overlap it. The session ends
+when:
 
 - **`doneWhen` exits 0** — the goal is met in the repo. The check runs from the
   repo root after a fetch of the base branch; write it against what's *merged*

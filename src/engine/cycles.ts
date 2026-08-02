@@ -44,6 +44,16 @@ const SLOT_WAIT_MS = 5 * 60 * 1000;
 const SLOT_POLL_MS = 5_000;
 
 /**
+ * Tools stripped from proposer/reviewer/reflection runs. These personas return
+ * findings for the engine to apply — and proposers run in the user's MAIN
+ * checkout, where "you are read-only" in the prompt has already been observed
+ * to lose to a persona body written like a work order. Bash stays (searching
+ * and running tests is the job), so this is a guardrail, not a wall — the
+ * checkout tripwire in proposerCycle catches what slips through it.
+ */
+const READONLY_DISALLOWED_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+
+/**
  * Get a worktree, waiting when the pool is momentarily full.
  *
  * Waiting (rather than creating an overflow worktree) is what makes
@@ -711,6 +721,7 @@ async function reflect(
     prompt: buildReflectionPrompt(),
     model: exec.model,
     expectJson: true,
+    disallowedTools: READONLY_DISALLOWED_TOOLS,
   });
   const parsed = res.friction ?? extractFriction(res.raw ?? "");
   for (const p of parsed) {
@@ -802,6 +813,7 @@ async function runReviewers(
           prompt: buildReviewerPrompt(cfg, rev, ports.constitution, item, prUrl),
           model: rev.model ?? cfg.models.default,
           expectJson: true,
+          disallowedTools: READONLY_DISALLOWED_TOOLS,
           onActivity: (line) => logger.info(`  ${rev.name} ${line}`),
         }),
       );
@@ -948,6 +960,14 @@ export async function proposerCycle(
     buildProposerPrompt(cfg, def.prompt, ports.constitution, def) +
     (opts?.extraContext ? `\n\n${opts.extraContext}` : "");
   logger.info(`${name}: starting run (a headless agent analyzes the repo; this can take a minute)…`);
+
+  // Baseline of the checkout the proposer runs in. A proposer is read-only by
+  // contract, but it's a full agent in the user's MAIN checkout — a persona
+  // body written like a work order has been observed to make it "just do" the
+  // work, committing straight to the user's branch. The snapshot is what lets
+  // us catch that instead of reporting the run as a quiet success.
+  const before = await ports.git.checkoutSnapshot?.().catch(() => null);
+
   const startedAt = Date.now();
   const res = await withHeartbeat(logger, name, () =>
     ports.persona.run(name, {
@@ -955,17 +975,50 @@ export async function proposerCycle(
       prompt,
       model: def.model ?? cfg.models.default,
       expectJson: true,
+      disallowedTools: READONLY_DISALLOWED_TOOLS,
       onActivity: (line) => logger.info(`  ${name} ${line}`),
     }),
   );
+
+  const stray = before ? await ports.git.strayWork?.(before).catch(() => null) : null;
   const runLog = recordRun(cfg.configDir, name, res.raw ?? "", {
     kind: "propose",
     agent: name,
-    outcome: res.usageLimited ? "usage-limited" : "ok",
+    outcome: res.usageLimited ? "usage-limited" : stray?.commits.length ? "failed" : "ok",
     ms: Date.now() - startedAt,
     model: def.model ?? cfg.models.default,
   });
   if (runLog) logger.info(`${name}: full run output → ${runLog}`);
+
+  // New commits during the run can only be the agent working instead of
+  // proposing (via Bash — the write tools are stripped). This is a failure of
+  // the run, never a success: the work bypassed worktrees, gates, and review,
+  // and any proposals it returned describe a repo that no longer exists.
+  if (stray?.commits.length) {
+    logger.error(
+      `${name}: the agent COMMITTED to your checkout (${cfg.repo.path}) instead of proposing — ` +
+        `${stray.commits.length} new commit(s) during a read-only run:`,
+    );
+    for (const c of stray.commits.slice(0, 10)) logger.error(`  ${name} │ ${c}`);
+    logger.error(
+      `${name}: no proposals were filed. Inspect the commits and keep or drop them ` +
+        `(\`git reset --keep <pre-run sha>\` discards). This persona's prompt likely reads ` +
+        `like an implementation task — a proposer must describe work to FILE, not do it.`,
+    );
+    return { status: "error", detail: "agent committed to the checkout during a read-only run" };
+  }
+  if (stray?.dirtyFiles.length) {
+    // Could be the agent editing without committing — or the user typing while
+    // the run was in flight. Attribution is impossible from here, so: warn
+    // loudly, keep the proposals, and let the user look at the named files.
+    logger.warn(
+      `${name}: ${stray.dirtyFiles.length} file(s) changed in ${cfg.repo.path} during this ` +
+        `read-only run: ${stray.dirtyFiles.slice(0, 10).join(", ")}` +
+        `${stray.dirtyFiles.length > 10 ? ", …" : ""}. If that wasn't you, the agent modified ` +
+        `your checkout — check \`git diff\` before trusting the working tree.`,
+    );
+  }
+
   if (res.usageLimited) return { status: "usage-limited", resetAt: res.resetAt ?? null };
 
   const created: string[] = [];

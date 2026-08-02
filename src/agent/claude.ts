@@ -47,8 +47,14 @@ export function runClaude(opts: RunPersonaOptions): Promise<PersonaResult> {
   // Note there is deliberately no `--allowedTools` here: it is ignored under
   // `--dangerously-skip-permissions` (above), which headless runs require. A
   // server's `allowedTools` is injected into the prompt by the runner instead.
+  // `--disallowedTools` is different: it removes the tool from the agent
+  // entirely, and that DOES hold under skip-permissions (verified) — which is
+  // what makes read-only personas enforceable rather than merely requested.
   args.push("--strict-mcp-config");
   if (opts.mcpConfigPath) args.push("--mcp-config", opts.mcpConfigPath);
+  if (opts.disallowedTools?.length) {
+    args.push("--disallowedTools", opts.disallowedTools.join(","));
+  }
 
   return new Promise<PersonaResult>((resolve) => {
     // Force subscription billing: strip API-key creds from the child env.

@@ -1,5 +1,5 @@
 import { exec } from "node:child_process";
-import type { AgentDef, CrewConfig, Logger } from "../types.js";
+import type { AgentDef, CrewConfig, Logger, WorkItem } from "../types.js";
 import type { Ports } from "./ports.js";
 import { proposerCycle } from "./cycles.js";
 import { backoffMs } from "./loop.js";
@@ -22,6 +22,15 @@ import { backoffMs } from "./loop.js";
 
 /** Iteration backstop when the config doesn't set one. Each costs an agent run. */
 export const DEFAULT_MAX_ITERATIONS = 12;
+
+/**
+ * Proposals per iteration when the persona doesn't set `maxProposals`. One on
+ * purpose: a drain session's pace should be set by work landing, and each
+ * proposal becomes a PR someone has to review — a migration that files a
+ * ten-item wall per iteration overwhelms reviewers, which is exactly the
+ * failure mode maxInProgress exists to prevent on the execution side.
+ */
+export const DEFAULT_DRAIN_MAX_PROPOSALS = 1;
 
 /**
  * Consecutive iterations that file nothing before the session stops. With a
@@ -119,17 +128,34 @@ const WAIT_LOG_MS = 5 * 60_000;
  * Extra prompt context for one drain iteration. The completion check's output
  * is the most valuable part: it tells the agent exactly what remains, so the
  * persona prompt can stay a description of the goal rather than a search
- * procedure. The filed list keeps a fresh context from re-proposing what this
- * session already filed but the dedup pass hasn't caught.
+ * procedure. The open-issue list is what lets it propose around in-flight
+ * work; the filed list covers this session's items the dedup pass hasn't
+ * caught yet.
  */
-function drainContext(def: AgentDef, remaining: string | undefined, filed: string[]): string {
+export function drainContext(
+  def: AgentDef,
+  remaining: string | undefined,
+  filed: string[],
+  openItems: WorkItem[],
+  maxProposals: number,
+): string {
+  const openLines = openItems
+    .slice(0, 50)
+    .map((i) => `- ${i.identifier} [${i.stateName}] ${i.title}`)
+    .join("\n");
   return [
     `# Drain session`,
     `You are one iteration of a run-to-completion session working toward a single goal.`,
-    `Earlier iterations' work may already be open or in flight on the tracker, so file`,
-    `only work NOT covered by an open issue. Prefer small, independent items scoped to`,
-    `distinct files, so they can be executed concurrently without overlapping. When`,
-    `nothing new is left to file, file nothing.`,
+    `You DO NOT do the work — you file it. Describe the next unit of work as a task for`,
+    `the implementer; never edit, commit, or run write operations yourself.`,
+    ``,
+    `File at most ${maxProposals} item(s) this iteration, each sized to become ONE`,
+    `reviewable pull request. Scope it to files no open issue already covers, and say`,
+    `exactly which files it covers, so concurrent work never overlaps. When nothing new`,
+    `is left to file, file nothing — that is a good outcome, not a failure.`,
+    openLines
+      ? `\nOpen issues on the board — do NOT propose work these already cover:\n${openLines}`
+      : "",
     remaining
       ? `\nCurrent output of the completion check (\`${def.doneWhen}\`) — this is what remains:\n\n\`\`\`\n${remaining}\n\`\`\``
       : "",
@@ -221,10 +247,20 @@ export async function runDrainSession(
 
       case "propose": {
         waiting = false;
-        const outcome = await proposerCycle(cfg, ports, def, logger, {
-          wipCap: limits.maxInProgress,
-          extraContext: drainContext(def, check?.output, filed),
-        });
+        // Board context is best-effort: a tracker without listOpen just means
+        // the agent leans on the dedup pass instead of seeing the list.
+        const openItems = (await ports.tracker.listOpen?.().catch(() => null)) ?? [];
+        const maxProposals = def.maxProposals ?? DEFAULT_DRAIN_MAX_PROPOSALS;
+        const outcome = await proposerCycle(
+          cfg,
+          ports,
+          { ...def, maxProposals },
+          logger,
+          {
+            wipCap: limits.maxInProgress,
+            extraContext: drainContext(def, check?.output, filed, openItems, maxProposals),
+          },
+        );
 
         if (outcome.status === "usage-limited") {
           const ms = backoffMs(outcome.resetAt, cfg.budget.backoffMinutes);

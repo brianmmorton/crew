@@ -106,3 +106,54 @@ test("runDoneWhen: a command that cannot run reads as not-done, carrying the err
   assert.equal(r.done, false);
   assert.ok(r.output.length > 0); // the shell's error message, for the log
 });
+
+// ------------------------------ drainContext --------------------------------
+
+import { DEFAULT_DRAIN_MAX_PROPOSALS, drainContext } from "./drain.js";
+import type { AgentDef, WorkItem } from "../types.js";
+
+const def = {
+  name: "migrator",
+  kind: "proposer",
+  prompt: "",
+  cadence: "",
+  builtin: false,
+  mode: "drain",
+  doneWhen: "check-cmd",
+} as AgentDef;
+
+const open = (identifier: string, title: string, stateName: string): WorkItem =>
+  ({ identifier, title, stateName }) as WorkItem;
+
+test("drain iterations default to one proposal — pace is set by review, not the agent", () => {
+  assert.equal(DEFAULT_DRAIN_MAX_PROPOSALS, 1);
+});
+
+test("drainContext shows the board's open issues so proposals steer around them", () => {
+  const ctx = drainContext(def, undefined, [], [open("IT-1", "migrate app.ts", "In Progress")], 1);
+  assert.match(ctx, /IT-1 \[In Progress\] migrate app\.ts/);
+  assert.match(ctx, /do NOT propose work these already cover/);
+});
+
+test("drainContext tells the agent it files work rather than doing it", () => {
+  const ctx = drainContext(def, undefined, [], [], 1);
+  assert.match(ctx, /DO NOT do the work/);
+  assert.match(ctx, /never edit, commit/);
+  assert.match(ctx, /at most 1 item/);
+  assert.match(ctx, /ONE\s+reviewable pull request/);
+});
+
+test("drainContext carries the completion check output and the session's filed items", () => {
+  const ctx = drainContext(def, "a.ts\nb.ts", ["IT-7"], [], 2);
+  assert.match(ctx, /check-cmd/);
+  assert.match(ctx, /a\.ts\nb\.ts/);
+  assert.match(ctx, /Already filed this session .*: IT-7/);
+  assert.match(ctx, /at most 2 item/);
+});
+
+test("drainContext omits the sections it has nothing for", () => {
+  const ctx = drainContext(def, undefined, [], [], 1);
+  assert.ok(!/Open issues on the board/.test(ctx));
+  assert.ok(!/completion check/.test(ctx));
+  assert.ok(!/Already filed/.test(ctx));
+});

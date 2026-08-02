@@ -530,6 +530,14 @@ export interface TrackerPort {
   /** Count of items in the backlog state (for the Triager's intake cap). */
   countBacklog(): Promise<number>;
 
+  /**
+   * Every open (not completed/canceled) item in this repo's scope, capped at
+   * one page. Context, not selection: drain sessions feed these to the agent
+   * so it proposes around what's already filed or in flight instead of
+   * overlapping it. Optional — callers must degrade to "no context".
+   */
+  listOpen?(): Promise<WorkItem[]>;
+
   /** Move an issue to a named workflow state. */
   transition(issueId: string, toStateName: string): Promise<void>;
 
@@ -668,6 +676,16 @@ export interface RunPersonaOptions {
   model?: string;
   /** If true, we expect structured JSON (proposers); else a commit outcome. */
   expectJson: boolean;
+  /**
+   * Tool names to remove from the agent entirely (Claude Code's
+   * `--disallowedTools`, which — unlike `--allowedTools` — still holds under
+   * `--dangerously-skip-permissions`). Proposer/reviewer runs pass the write
+   * tools here: they run in the user's MAIN checkout, and "you are read-only"
+   * in the prompt is a request, not a guarantee. Not airtight (Bash remains,
+   * agents need it to search and run tests) — the checkout tripwire in
+   * proposerCycle is the backstop for what slips through.
+   */
+  disallowedTools?: string[];
   /** Called with a compact line for each streamed agent step (tool use, text). */
   onActivity?: (line: string) => void;
   /**

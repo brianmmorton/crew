@@ -278,6 +278,19 @@ export class LinearAdapter implements TrackerPort {
     return this.countInState(this.cfg.tracker.statuses.inProgress);
   }
 
+  async listOpen(): Promise<WorkItem[]> {
+    this.ensureMeta();
+    const team = this.ensureTeam();
+    const conn = await team.issues({
+      filter: {
+        state: { type: { nin: ["completed", "canceled"] } },
+        ...this.projectFilter(),
+      },
+      first: PAGE,
+    });
+    return Promise.all(conn.nodes.map((i) => this.toWorkItem(i)));
+  }
+
   async countBacklog(): Promise<number> {
     return this.countInState(this.cfg.tracker.statuses.backlog);
   }
