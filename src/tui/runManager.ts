@@ -10,8 +10,9 @@ import {
 import { invalidateTrackerCounts } from "./stores/pool.js";
 
 /**
- * Manual agent runs. Each is `crew once <agent>` as a child process, re-exec'd
- * with the same node binary + entry script the TUI was launched with
+ * Manual agent runs. Each is `crew once <agent>` (or `crew drain <agent>` for
+ * a run-to-completion drain session) as a child process, re-exec'd with the
+ * same node binary + entry script the TUI was launched with
  * (process.execPath / process.argv[1]) so it works identically against
  * dist/cli/index.js and tsx-run source, without `crew` on PATH.
  *
@@ -31,11 +32,11 @@ export function isRunning(agent: PersonaName): boolean {
   return procs.has(agent);
 }
 
-export function startRun(agent: PersonaName): void {
+export function startRun(agent: PersonaName, verb: "once" | "drain" = "once"): void {
   if (procs.has(agent)) return;
 
   beginRun(agent);
-  const child = spawn(process.execPath, [process.argv[1] ?? "", "once", agent], {
+  const child = spawn(process.execPath, [process.argv[1] ?? "", verb, agent], {
     stdio: ["ignore", "pipe", "pipe"],
     env: process.env,
   });

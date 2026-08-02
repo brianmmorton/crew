@@ -8,6 +8,7 @@ import {
   allClaims,
   agentsOfKind,
   discoverPersonaFiles,
+  drainAgents,
   executorFor,
   isValidAgentName,
   loadAgents,
@@ -204,6 +205,56 @@ test("a non-positive maxProposals is rejected", () => {
   assert.throws(() => loadAgents(cfg), /maxProposals/);
 });
 
+// ----------------------------- drain mode ----------------------------------
+
+test("drain frontmatter configures a run-to-completion proposer", () => {
+  const cfg = fixture({
+    migrate: [
+      "---",
+      "mode: drain",
+      'doneWhen: "! rg -l jest src"',
+      "maxInProgress: 2",
+      "maxIterations: 8",
+      "---",
+      "Migrate jest to vitest.",
+    ].join("\n"),
+  });
+  const [a] = loadAgents(cfg);
+  assert.equal(a.kind, "proposer");
+  assert.equal(a.mode, "drain");
+  assert.equal(a.doneWhen, "! rg -l jest src");
+  assert.equal(a.maxInProgress, 2);
+  assert.equal(a.maxIterations, 8);
+  assert.equal(a.cadence, ""); // manual-only: no cadence is ever derived
+});
+
+test("an unknown mode is a loud error", () => {
+  const cfg = fixture({ bad: "---\nmode: forever\n---\nx" });
+  assert.throws(() => loadAgents(cfg), /mode/);
+});
+
+test("drain mode on a non-proposer is rejected", () => {
+  const cfg = fixture({ bad: "---\nkind: executor\nmode: drain\n---\nx" });
+  assert.throws(() => loadAgents(cfg), /drain/);
+});
+
+test("a cadence on a drain agent is rejected — it would silently never fire", () => {
+  const cfg = fixture({ bad: '---\nmode: drain\ncadence: "0 9 * * 1"\n---\nx' });
+  assert.throws(() => loadAgents(cfg), /manually/);
+});
+
+test("drain settings from config.yaml apply without frontmatter", () => {
+  const cfg = fixture({ migrate: "Migrate.\n" }, { migrate: { mode: "drain", maxInProgress: 3 } });
+  const [a] = loadAgents(cfg);
+  assert.equal(a.mode, "drain");
+  assert.equal(a.maxInProgress, 3);
+});
+
+test("a non-positive maxInProgress is rejected", () => {
+  const cfg = fixture({ bad: "---\nmode: drain\nmaxInProgress: 0\n---\nx" });
+  assert.throws(() => loadAgents(cfg), /maxInProgress/);
+});
+
 test("isValidAgentName accepts kebab-case and rejects unsafe names", () => {
   assert.ok(isValidAgentName("qa"));
   assert.ok(isValidAgentName("security-review"));
@@ -242,6 +293,15 @@ test("scheduledAgents excludes executors and cadence-less agents", () => {
     mk("idle", "proposer", { cadence: "" }),
   ];
   assert.deepEqual(scheduledAgents(agents).map((a) => a.name), ["qa"]);
+});
+
+test("drain agents are never cron-scheduled, and drainAgents finds them", () => {
+  const agents = [
+    mk("qa", "proposer"),
+    mk("migrate", "proposer", { cadence: "", mode: "drain" }),
+  ];
+  assert.deepEqual(scheduledAgents(agents).map((a) => a.name), ["qa"]);
+  assert.deepEqual(drainAgents(agents).map((a) => a.name), ["migrate"]);
 });
 
 test("agentsOfKind filters by kind", () => {

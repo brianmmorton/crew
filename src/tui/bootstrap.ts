@@ -1,7 +1,7 @@
 import { statSync } from "node:fs";
 import { Cron } from "croner";
 import type { CrewConfig } from "../types.js";
-import { agentsOfKind, scheduledAgents } from "../agent/agents.js";
+import { agentsOfKind, drainAgents, scheduledAgents } from "../agent/agents.js";
 import { buildPorts, type Ports } from "../engine/ports.js";
 import { requestStop, resetStop, runExecutorLoop, setPaused } from "../engine/loop.js";
 import { poolStatus, worktreeRootFor } from "../git/pool.js";
@@ -207,8 +207,8 @@ async function refreshCounts(): Promise<void> {
 
 /**
  * Panel order: scheduled agents first (they have a "next" worth reading),
- * then executors, then reviewers — deduped by name so a reviewer WITH a
- * cadence doesn't appear twice.
+ * then drain agents (manual sessions), then executors, then reviewers —
+ * deduped by name so a reviewer WITH a cadence doesn't appear twice.
  */
 function buildAgentItems(p: Ports): AgentItem[] {
   const all = Object.values(p.agents).sort((a, b) => a.name.localeCompare(b.name));
@@ -220,12 +220,16 @@ function buildAgentItems(p: Ports): AgentItem[] {
     rows.push({
       name: def.name,
       kind: def.kind,
-      cadence: def.cadence,
+      // Drain agents have no cadence; "drain" reads better in the schedule
+      // column than the generic "manual" fallback.
+      cadence: def.mode === "drain" ? "drain" : def.cadence,
       description: def.description,
       nextRun,
+      mode: def.mode,
     });
   };
   for (const def of scheduledAgents(all)) push(def, nextRunFor(def.cadence));
+  for (const def of drainAgents(all)) push(def, null);
   for (const def of agentsOfKind(all, "executor")) push(def, null);
   for (const def of agentsOfKind(all, "reviewer")) push(def, null);
   return rows;

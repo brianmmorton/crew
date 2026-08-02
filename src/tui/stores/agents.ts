@@ -18,6 +18,8 @@ export interface AgentItem {
   description?: string;
   /** Next scheduled fire (epoch ms), null for continuous/unscheduled agents. */
   nextRun: number | null;
+  /** "drain" = the run key starts a run-to-completion session, not one cycle. */
+  mode?: "drain";
 }
 
 export const agentsStore = proxy({

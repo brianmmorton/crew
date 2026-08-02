@@ -8,6 +8,7 @@ import { loadConfig, crewDirName, crewRepoOverride } from "../config/load.js";
 import { inspectRepo } from "../git/discover.js";
 import { buildPorts } from "../engine/ports.js";
 import { implementerCycle, proposerCycle } from "../engine/cycles.js";
+import { runDrainSession } from "../engine/drain.js";
 import { runSetup, launchInteractiveAgent } from "../setup/onboard.js";
 import { ensureGitignored } from "../util/gitignore.js";
 import { checkLabelGate, runDoctor } from "../util/doctor.js";
@@ -19,6 +20,7 @@ import { writeFileSync } from "node:fs";
 import {
   agentsOfKind,
   discoverPersonaFiles,
+  drainAgents,
   isValidAgentName,
   loadAgents,
   orphanedConfigEntries,
@@ -57,6 +59,9 @@ function printSchedule(agents: AgentDef[]): void {
     );
   }
   if (!sched.length) console.log("  (no scheduled agents)");
+  for (const a of drainAgents(agents)) {
+    console.log(`  ${a.name.padEnd(14)} drain          (manual: crew drain ${a.name})`);
+  }
   for (const a of agentsOfKind(agents, "executor")) {
     console.log(`  ${a.name.padEnd(14)} continuous     (runs whenever there is ready work)`);
   }
@@ -614,6 +619,36 @@ program
   });
 
 program
+  .command("drain")
+  .argument("<agent>", "a proposer with `mode: drain` — see `crew agents`")
+  .description(
+    "Run a drain agent to completion: propose, wait for the executor, repeat until its doneWhen check passes or nothing new gets filed",
+  )
+  .action(async (name: PersonaName) => {
+    const cfg = loadConfig();
+    const def = loadAgents(cfg).find((a) => a.name === name);
+    if (!def) {
+      const known = discoverPersonaFiles(cfg).join(", ") || "(none)";
+      console.error(`Unknown agent "${name}". Defined agents: ${known}`);
+      process.exit(1);
+    }
+    if (def.mode !== "drain") {
+      console.error(
+        `"${name}" is not a drain agent. Add \`mode: drain\` (and ideally a \`doneWhen\` ` +
+          `completion check) to its frontmatter or config.yaml entry, or run one cycle ` +
+          `with: crew once ${name}`,
+      );
+      process.exit(1);
+    }
+
+    logToFile(logFilePath(cfg.configDir));
+    const ports = await buildPorts(cfg);
+    const outcome = await runDrainSession(cfg, ports, def, logger);
+    console.log(JSON.stringify(outcome, null, 2));
+    process.exit(outcome.status === "error" ? 1 : 0);
+  });
+
+program
   .command("agents")
   .description("List every agent defined for this repo, its kind, cadence, and options")
   .action(() => {
@@ -637,7 +672,9 @@ program
             ? "continuous"
             : kind === "reviewer"
               ? "on-pr"
-              : a.cadence || "(no cadence — never scheduled)";
+              : a.mode === "drain"
+                ? "drain (manual)"
+                : a.cadence || "(no cadence — never scheduled)";
         const next = a.cadence && a.cadence !== "continuous" ? nextRunFor(a.cadence) : null;
         console.log(
           `  ${a.name.padEnd(16)} ${when.padEnd(16)}` +
@@ -648,6 +685,11 @@ program
         if (a.model) opts.push(`model=${a.model}`);
         if (a.allowedTypes?.length) opts.push(`types=${a.allowedTypes.join("/")}`);
         if (a.maxProposals) opts.push(`max=${a.maxProposals}`);
+        if (a.mode === "drain") {
+          if (a.doneWhen) opts.push(`doneWhen=\`${a.doneWhen}\``);
+          if (a.maxInProgress) opts.push(`maxInProgress=${a.maxInProgress}`);
+          if (a.maxIterations) opts.push(`maxIterations=${a.maxIterations}`);
+        }
         if (a.label) opts.push(`label=${a.label}`);
         if (a.claims?.length) opts.push(`claims=${a.claims.join("/")}`);
         if (a.canTransitionTo?.length) opts.push(`canMoveTo=${a.canTransitionTo.join("/")}`);

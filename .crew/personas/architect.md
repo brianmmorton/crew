@@ -2,7 +2,7 @@
 kind: proposer
 cadence: "0 9 * * 2,5"
 description: Watches crew's structural health — module boundaries, adapter symmetry, engine/persona separation, dependency health.
-allowedTypes: [task, spike, chore]
+allowedTypes: [task, spike, chore-dx]
 maxProposals: 3
 label: "agent:architect"
 ---

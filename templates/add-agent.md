@@ -34,6 +34,16 @@ Based on the kind, work out with the user:
   yourself), optionally `allowedTypes` (subset of `bug`, `task`, `chore-dx`,
   `spike`, `prd`), `maxProposals` (cap per run), `label` (to tag/filter what it
   files on the board).
+
+  If the goal is FINITE with a checkable end state — "migrate every X to Y",
+  "remove every use of Z" — offer `mode: drain` instead of a cadence: the user
+  starts it manually (`crew drain <name>` or the TUI run key) and it loops until
+  done. Work out its `doneWhen` (a shell command from the repo root; exit 0 =
+  goal met; ideally its stdout LISTS what remains, e.g. a grep for the old
+  pattern — that output is fed back to the agent each iteration), and optionally
+  `maxInProgress` (pause while this many tracker items are in progress; keep it
+  low so proposals see prior work land) and `maxIterations` (backstop, default
+  12). Drain agents take no `cadence` — that combination is a config error.
 - **executor**: `claims` — the labels that route work items to this agent
   instead of the default `implementer`. Ask what labels or item types should go
   to this agent specifically.
@@ -99,6 +109,10 @@ description: "<one line>"
 allowedTypes: [...]        # proposer, optional
 maxProposals: <n>          # proposer, optional
 label: "agent:<name>"      # proposer, optional
+mode: drain                # proposer, optional: manual run-to-completion (no cadence)
+doneWhen: "<command>"      # drain only: exit 0 = goal met; stdout = what remains
+maxInProgress: <n>         # drain only, optional: pause while this many in progress
+maxIterations: <n>         # drain only, optional backstop (default 12)
 claims: [...]              # executor
 canTransitionTo: [...]     # reviewer
 mcp: [...]                 # optional, any kind
@@ -116,6 +130,8 @@ Read the file back to confirm it matches what was discussed. Tell the user:
 
 - `crew agents` — see it listed alongside everything else.
 - For a proposer: `crew once <name>` to try a single cycle right now.
+- For a drain agent: `crew once <name>` for a dry single cycle, then
+  `crew drain <name>` to run the whole session.
 - For an executor: it needs `claims` set to pick up work; then `crew`.
 - For a reviewer: it runs automatically the next time a PR opens.
 - If frontmatter or prompt needs a tweak later, they can just edit the file

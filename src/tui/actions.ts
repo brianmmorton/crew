@@ -146,14 +146,22 @@ function runAgent(agent: AgentItem): void {
     case "reviewer":
       logger.info(`${agent.name} is a reviewer — it runs automatically after a PR opens`);
       return;
-    default:
+    default: {
       if (runsStore.byAgent[agent.name]?.status === "running") {
         logger.info(`${agent.name} is already running`);
         return;
       }
-      logger.info(`starting ${agent.name} (crew once ${agent.name})`);
-      startRun(agent.name);
+      // A drain agent's run key starts the whole run-to-completion session —
+      // one child that loops until its goal is met — not a single cycle.
+      const verb = agent.mode === "drain" ? "drain" : "once";
+      logger.info(
+        verb === "drain"
+          ? `starting ${agent.name} drain session (crew drain ${agent.name}) — runs until done`
+          : `starting ${agent.name} (crew once ${agent.name})`,
+      );
+      startRun(agent.name, verb);
       agentsStore.expanded[agent.name] = true;
+    }
   }
 }
 

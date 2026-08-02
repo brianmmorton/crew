@@ -259,6 +259,7 @@ crew applies on GitHub are simply skipped; and PRs are opened with
 | `crew agents` | List every agent, its kind, cadence, and options |
 | `crew agent new <name>` | Scaffold a new agent (`--kind proposer\|executor\|reviewer`) |
 | `crew once <agent>` | Run one cycle of any agent now |
+| `crew drain <agent>` | Run a `mode: drain` agent to completion ([drain agents](#drain-agents-run-to-completion)) |
 | `crew` | Run the whole team on a live screen (executor loop + scheduled agents) |
 
 Running `crew` with no arguments starts the live screen: the agent roster with
@@ -373,7 +374,7 @@ drives it:
 
 | Kind | When it runs | What it does |
 |---|---|---|
-| `proposer` | on a cron cadence | Reads the repo read-only and files typed work items |
+| `proposer` | on a cron cadence (or a manual [drain session](#drain-agents-run-to-completion)) | Reads the repo read-only and files typed work items |
 | `executor` | whenever there's ready work | Implements one item in a worktree and opens a PR |
 | `reviewer` | after a PR is opened | Comments on the PR / tracker issue, can move the issue |
 
@@ -420,10 +421,55 @@ You are the accessibility agent. Audit for…
 | `claims` | executors | Item labels that route work to this agent |
 | `canTransitionTo` | reviewers | Workflow states it may move an issue to |
 | `mcp` | all | External tool servers to grant ([see below](#external-tools-mcp)) |
+| `mode: drain` | proposers | Run-to-completion sessions instead of a cadence ([see below](#drain-agents-run-to-completion)) |
+| `doneWhen` | drain | Completion check command; exit 0 ends the session |
+| `maxInProgress` | drain | Pause the session while this many items are in progress |
+| `maxIterations` | drain | Hard cap on agent runs per session (default 12) |
 
 `allowedTypes`, `maxProposals`, and `canTransitionTo` are enforced by the engine
 after the agent runs, not just requested in the prompt — a custom agent can't
 flood your backlog or move an issue somewhere you didn't allow.
+
+### Drain agents (run to completion)
+
+A scheduled proposer wakes up, files what it finds, and exits — right for
+open-ended work like QA. But some work is **finite with a checkable end state**:
+migrate every jest test to vitest, remove every use of a deprecated API, add
+missing types file by file. For those, give the agent `mode: drain` and start
+it manually — from the TUI run key, or `crew drain <name>`:
+
+```markdown
+---
+mode: drain
+doneWhen: "! grep -rl '@jest/globals' src --include='*.test.*'"
+maxInProgress: 2
+maxProposals: 4
+description: "Migrates jest tests to vitest until none remain"
+---
+
+You are the vitest migration agent. Find jest test files not yet migrated and
+file one task per file describing the migration…
+```
+
+A drain session loops: check `doneWhen`, propose, wait while the executor works,
+repeat. Between iterations it **waits until fewer than `maxInProgress` items are
+in progress**, so each round of proposals is made against a repo that reflects
+the work already done — not stacked blind on top of in-flight tasks that would
+overlap it. The session ends when:
+
+- **`doneWhen` exits 0** — the goal is met in the repo. The check runs from the
+  repo root after a fetch of the base branch; write it against what's *merged*
+  (e.g. `git grep` against `origin/main`) if your checkout drifts. Its stdout is
+  handed to the agent each iteration as "what remains", so a command that lists
+  the leftover files both terminates the session and focuses it.
+- **Nothing new gets filed** — everything left is already covered by open or
+  in-flight issues (usually PRs waiting for review). Re-run the session after
+  they merge; `doneWhen` keys off repo state, so resuming is idempotent.
+- **The `maxIterations` backstop** (default 12) — so a check that can never
+  pass bounds its cost instead of running all night.
+
+Drain agents are manual-only: they're never cron-scheduled or pulled in by idle
+triggers, and setting a `cadence` on one is a config error.
 
 ### Custom executors
 

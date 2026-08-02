@@ -87,6 +87,24 @@ function toPersonaConfig(raw: Record<string, unknown>, where: string): PersonaCo
   out.claims = strArr(raw.claims);
   out.canTransitionTo = strArr(raw.canTransitionTo);
   out.mcp = strArr(raw.mcp);
+  out.doneWhen = str(raw.doneWhen);
+
+  if (raw.mode !== undefined) {
+    const m = str(raw.mode);
+    if (m !== "drain") {
+      throw new AgentError(`${where}: invalid mode "${String(raw.mode)}" (expected "drain")`);
+    }
+    out.mode = m;
+  }
+  for (const field of ["maxInProgress", "maxIterations"] as const) {
+    if (raw[field] !== undefined) {
+      const n = Number(raw[field]);
+      if (!Number.isInteger(n) || n < 1) {
+        throw new AgentError(`${where}: ${field} must be a positive integer`);
+      }
+      out[field] = n;
+    }
+  }
 
   if (raw.allowedTypes !== undefined) {
     const types = strArr(raw.allowedTypes) ?? [];
@@ -158,6 +176,24 @@ export function loadAgents(cfg: CrewConfig): AgentDef[] {
     const builtin = (BUILTIN_PERSONAS as readonly string[]).includes(name);
     const kind = m.kind ?? BUILTIN_KINDS[name] ?? "proposer";
 
+    // Drain mode is a way of DRIVING a proposer, so it composes with nothing
+    // else: executors are already continuous and reviewers are event-driven.
+    // A cadence on a drain agent would silently never fire (drain agents are
+    // manual-only), which is exactly the kind of config that must fail loudly.
+    if (m.mode === "drain") {
+      if (kind !== "proposer") {
+        throw new AgentError(
+          `personas/${name}.md: mode "drain" requires kind "proposer" (got "${kind}")`,
+        );
+      }
+      if (m.cadence) {
+        throw new AgentError(
+          `personas/${name}.md: mode "drain" agents run manually (crew drain ${name}) — ` +
+            `remove the cadence or the mode`,
+        );
+      }
+    }
+
     // Checked on the MERGED value, so a grant typed into frontmatter is caught
     // as loudly as one in config.yaml. Left unchecked it fails open — the run
     // proceeds, files nothing, and repeats every cadence with no obvious cause.
@@ -185,6 +221,10 @@ export function loadAgents(cfg: CrewConfig): AgentDef[] {
       claims: m.claims,
       canTransitionTo: m.canTransitionTo,
       mcp: m.mcp,
+      mode: m.mode,
+      doneWhen: m.doneWhen,
+      maxInProgress: m.maxInProgress,
+      maxIterations: m.maxIterations,
     });
   }
 
@@ -207,8 +247,17 @@ export function agentsOfKind(agents: AgentDef[], kind: AgentKind): AgentDef[] {
 /** Proposers/reviewers that are scheduled to run on a cron cadence. */
 export function scheduledAgents(agents: AgentDef[]): AgentDef[] {
   return agents.filter(
-    (a) => a.kind !== "executor" && !!a.cadence && a.cadence !== "continuous",
+    (a) =>
+      a.kind !== "executor" &&
+      a.mode !== "drain" && // manual-only: `crew drain <name>` or the TUI run key
+      !!a.cadence &&
+      a.cadence !== "continuous",
   );
+}
+
+/** Drain-mode proposers: manual run-to-completion sessions, never scheduled. */
+export function drainAgents(agents: AgentDef[]): AgentDef[] {
+  return agents.filter((a) => a.mode === "drain");
 }
 
 /**

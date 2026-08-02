@@ -186,6 +186,14 @@ export const configSchema = z.object({
         claims: z.array(z.string()).optional(),
         // reviewer: workflow states it may move an issue to (empty = comment only)
         canTransitionTo: z.array(z.string()).optional(),
+        // proposer: "drain" = manual run-to-completion sessions (crew drain <name>)
+        mode: z.enum(["drain"]).optional(),
+        // drain: completion check, run from the repo root; exit 0 = done
+        doneWhen: z.string().optional(),
+        // drain: pause the session while this many items are in progress
+        maxInProgress: z.number().int().min(1).optional(),
+        // drain: hard cap on agent iterations per session
+        maxIterations: z.number().int().min(1).optional(),
         // names from the top-level mcpServers block to grant this persona.
         // Omitted = no external tools (grants are always explicit).
         mcp: z.array(z.string()).optional(),

@@ -59,6 +59,29 @@ export interface PersonaConfig {
   claims?: string[];
   canTransitionTo?: string[];
   /**
+   * "drain" turns a proposer into a run-to-completion agent: a manual trigger
+   * starts a session that repeatedly proposes until `doneWhen` reports the goal
+   * is met (or nothing new gets filed), instead of one cycle per cron tick.
+   * Drain agents are never cron-scheduled or idle-triggered.
+   */
+  mode?: "drain";
+  /**
+   * Drain only: shell command run from the repo root between iterations; exit 0
+   * means the goal is met and the session ends. Its stdout is fed to the agent
+   * as "what remains", so a command that LISTS the remaining work (e.g.
+   * `rg -l "@jest/globals" src`) both terminates the session and focuses it.
+   * Omitted = the session ends the first time an iteration files nothing.
+   */
+  doneWhen?: string;
+  /**
+   * Drain only: pause the session while this many tracker items are in
+   * progress, so proposals are always made against a repo that reflects the
+   * work already done — not stacked on top of it. Defaults to gates.wipCap.
+   */
+  maxInProgress?: number;
+  /** Drain only: hard cap on agent iterations per session (backstop). */
+  maxIterations?: number;
+  /**
    * Names from the top-level `mcpServers:` block to grant this persona. Omitted
    * or empty means no external tools at all — grants are always explicit, and a
    * run never inherits the user's global MCP config. See `src/config/mcp.ts`.
@@ -154,6 +177,14 @@ export interface AgentDef {
   maxProposals?: number;
   /** Extra tracker label applied to everything this agent files. */
   label?: string;
+  /** "drain" = manual run-to-completion sessions; see PersonaConfig.mode. */
+  mode?: "drain";
+  /** Drain: completion check command (exit 0 = done). See PersonaConfig. */
+  doneWhen?: string;
+  /** Drain: pause while this many items are in progress. */
+  maxInProgress?: number;
+  /** Drain: hard cap on iterations per session. */
+  maxIterations?: number;
 
   // --- executor options ---
   /**

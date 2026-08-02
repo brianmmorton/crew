@@ -909,6 +909,16 @@ export async function proposerCycle(
   ports: Ports,
   agent: AgentDef | PersonaName,
   logger: Logger,
+  opts?: {
+    /**
+     * Replaces gates.wipCap for THIS cycle's in-progress gate. A drain session
+     * (see engine/drain.ts) owns its own concurrency bound, and the global cap
+     * silently shadowing a larger per-agent one would be a config mystery.
+     */
+    wipCap?: number;
+    /** Appended to the built prompt — drain sessions pass what remains. */
+    extraContext?: string;
+  },
 ): Promise<CycleOutcome> {
   const def = typeof agent === "string" ? ports.agents[agent] : agent;
   if (!def) {
@@ -925,15 +935,18 @@ export async function proposerCycle(
   // The executor is saturated, so anything filed now just queues up behind work
   // that's already waiting. Skip the run rather than burn tokens deepening a
   // backlog nobody is draining.
-  if ((await ports.tracker.countInProgress()) >= cfg.gates.wipCap) {
+  const wipCap = opts?.wipCap ?? cfg.gates.wipCap;
+  if ((await ports.tracker.countInProgress()) >= wipCap) {
     logger.warn(
-      `${name}: executor at WIP cap (${cfg.gates.wipCap} in "${cfg.tracker.statuses.inProgress}"); ` +
+      `${name}: executor at WIP cap (${wipCap} in "${cfg.tracker.statuses.inProgress}"); ` +
         `not filing new items`,
     );
     return { status: "capped" };
   }
 
-  const prompt = buildProposerPrompt(cfg, def.prompt, ports.constitution, def);
+  const prompt =
+    buildProposerPrompt(cfg, def.prompt, ports.constitution, def) +
+    (opts?.extraContext ? `\n\n${opts.extraContext}` : "");
   logger.info(`${name}: starting run (a headless agent analyzes the repo; this can take a minute)…`);
   const startedAt = Date.now();
   const res = await withHeartbeat(logger, name, () =>
