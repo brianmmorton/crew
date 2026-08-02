@@ -396,6 +396,11 @@ program
   )
   .action(async (opts: { verbose?: boolean }) => {
     const cfg = loadConfig();
+    // Self-heal AGENTS.md on the daily-driver command, not just init/setup/
+    // doctor: a repo onboarded before the doc existed (or before the current
+    // crew version) would otherwise carry a missing/stale copy indefinitely —
+    // and it's what in-repo agents read to learn what crew is.
+    refreshAgentsDoc(cfg.configDir, TEMPLATES(), packageVersion());
     // Quiet: warn to the log file on missing prereqs (OAuth logins included)
     // and continue — the header now surfaces OAuth login state live, so this
     // is a startup nudge into the log, not a gate.
@@ -735,6 +740,14 @@ agentCmd
       process.exit(1);
     }
 
+    // The designing agent works inside this repo and leans on .crew/AGENTS.md
+    // to know what crew is (kinds, drain mode, persona fields). Refresh it
+    // FIRST, so a repo onboarded under an older crew doesn't have its new
+    // agent designed against missing or stale docs.
+    if (refreshAgentsDoc(cfg.configDir, TEMPLATES(), packageVersion())) {
+      console.log(`Updated ${join(cfg.configDir, "AGENTS.md")} for this crew version.\n`);
+    }
+
     const promptPath = fileURLToPath(new URL("../../templates/add-agent.md", import.meta.url));
     let prompt = readFileSync(promptPath, "utf8");
     if (name) {
@@ -787,6 +800,9 @@ agentCmd
         console.error(`${file} already exists — edit it directly.`);
         process.exit(1);
       }
+      // Same self-heal as `agent add`: whoever edits the scaffold next (human
+      // or agent) should find current crew docs beside it.
+      refreshAgentsDoc(cfg.configDir, TEMPLATES(), packageVersion());
       mkdirSync(dir, { recursive: true });
       writeFileSync(file, agentTemplate(name, kind, opts), "utf8");
 

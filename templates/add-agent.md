@@ -22,9 +22,12 @@ anything — a vague prompt produces a vague agent. Follow up until you know:
 - A short, lowercase-hyphenated name for it (2-40 chars, e.g. `security-review`,
   `docs-writer`). This becomes the filename.
 
-Look at `.crew/personas/*.md` for the existing agents (including the built-ins:
-implementer, qa, design, architect, triager) so the new one doesn't duplicate
-one that already exists, and so its style/conventions match the others.
+Read `.crew/AGENTS.md` first — it is crew's own reference (kinds, drain mode,
+every persona field) and is kept current with the installed version; prefer it
+over guessing. Then look at `.crew/personas/*.md` for the existing agents
+(including the built-ins: implementer, qa, design, architect, triager) so the
+new one doesn't duplicate one that already exists, and so its
+style/conventions match the others.
 
 ## 2. Nail down the kind-specific settings
 
